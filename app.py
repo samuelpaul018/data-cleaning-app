@@ -162,9 +162,43 @@ def clean_step2_data(files, selected_month_year):
     output_files = {}
     
     try:
-        monthly_min_df = pd.read_csv(io.BytesIO(files['Monthly_Min_Step1'].getvalue()))
-        valor_df = pd.read_csv(io.BytesIO(files['Valor_Step1'].getvalue()))
+        # Read Monthly Min file with multiple encoding attempts
+        monthly_min_file = files['Monthly_Min_Step1']
+        st.info("Reading Monthly Min file...")
+        try:
+            monthly_min_df = pd.read_csv(io.BytesIO(monthly_min_file.getvalue()), encoding='utf-8')
+            st.success("✓ Monthly Min read as CSV (UTF-8)")
+        except:
+            try:
+                monthly_min_df = pd.read_csv(io.BytesIO(monthly_min_file.getvalue()), encoding='latin-1')
+                st.success("✓ Monthly Min read as CSV (Latin-1)")
+            except:
+                try:
+                    monthly_min_df = pd.read_csv(io.BytesIO(monthly_min_file.getvalue()), encoding='cp1252')
+                    st.success("✓ Monthly Min read as CSV (Windows)")
+                except:
+                    monthly_min_df = pd.read_excel(io.BytesIO(monthly_min_file.getvalue()), engine='openpyxl')
+                    st.success("✓ Monthly Min read as Excel")
         
+        # Read Valor file with multiple encoding attempts
+        valor_file = files['Valor_Step1']
+        st.info("Reading Valor file...")
+        try:
+            valor_df = pd.read_csv(io.BytesIO(valor_file.getvalue()), encoding='utf-8')
+            st.success("✓ Valor read as CSV (UTF-8)")
+        except:
+            try:
+                valor_df = pd.read_csv(io.BytesIO(valor_file.getvalue()), encoding='latin-1')
+                st.success("✓ Valor read as CSV (Latin-1)")
+            except:
+                try:
+                    valor_df = pd.read_csv(io.BytesIO(valor_file.getvalue()), encoding='cp1252')
+                    st.success("✓ Valor read as CSV (Windows)")
+                except:
+                    valor_df = pd.read_excel(io.BytesIO(valor_file.getvalue()), engine='openpyxl')
+                    st.success("✓ Valor read as Excel")
+        
+        st.info("Creating output file...")
         output_buffer = io.BytesIO()
         with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
             monthly_min_df.head(100).to_excel(writer, sheet_name='Monthly_Min', index=False)
@@ -181,6 +215,7 @@ def clean_step2_data(files, selected_month_year):
         output_buffer.seek(0)
         output_files['step2_final_output.xlsx'] = output_buffer
         
+        st.success("✅ Step 2 processing complete!")
         return output_files
         
     except Exception as e:
