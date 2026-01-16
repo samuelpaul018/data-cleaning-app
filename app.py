@@ -17,6 +17,10 @@ st.set_page_config(
 
 st.title("🧹 Residuals Data Cleaning Pipeline (Full Sync)")
 
+# Initialize session state for persistent storage
+if "pipeline_results" not in st.session_state:
+    st.session_state.pipeline_results = None
+
 # =============================
 # Sidebar: Settings
 # =============================
@@ -43,13 +47,11 @@ def clean_nbsp(df):
     return df
 
 def clean_id(s):
-    s = s.astype(str).str.replace(r"\.0$", "", regex=True).str.strip()
-    return s
+    return s.astype(str).str.replace(r"\.0$", "", regex=True).str.strip()
 
 # =============================
-# Core Pipeline Logic
+# Pipeline Core
 # =============================
-
 def run_pipeline(files, selected_month_year, six_months_before):
     # 1. Load Synoptics
     tsys = clean_nbsp(pd.read_csv(files["Synoptic_TSYS"]))
@@ -63,13 +65,11 @@ def run_pipeline(files, selected_month_year, six_months_before):
     tsys.loc[(tsys["Status"].str.lower() == "closed") & (tsys["Date Closed"] > selected_month_year), "Status"] = "Open"
     tsys = tsys[~((tsys["Status"].str.lower() == "closed") & (tsys["Last Deposit Date"].isna() | (tsys["Last Deposit Date"] <= six_months_before)))]
     tsys = tsys[~tsys["Status"].str.lower().isin(["closed", "declined", "cancelled"])]
-    tsys = tsys[~tsys["Rep Name"].str.lower().isin(["hubwallet", "stephany perez", "nigel westbury", "brandon_casillas"])]
-
+    
     # Fiserv Filtering
     fiserv["Open Date"] = pd.to_datetime(fiserv["Open Date"], errors='coerce')
     fiserv = fiserv[~(fiserv["Open Date"] > selected_month_year)]
     fiserv = fiserv[fiserv["Sales Agent"].str.contains(r"[A-Za-z]", na=False) | fiserv["Sales Agent"].isin(["2030", "3030", "4030", "5030"])]
-    fiserv = fiserv[fiserv["Sales Agent"] != "IS02"]
 
     # 2. PASO Output
     p1 = pd.read_csv(files["PASO_S1"], skiprows=1)
@@ -77,66 +77,56 @@ def run_pipeline(files, selected_month_year, six_months_before):
     paso_all = pd.concat([p1, p2])
     paso_output = paso_all[paso_all["MerchantNumber"].astype(str).isin(fiserv["Merchant #"].astype(str))]
 
-    # 3. Zoho & Fees
-    zoho = pd.read_excel(files["Zoho_All_Fees"], skiprows=6)
-    zoho = clean_nbsp(zoho)
-    zoho["Merchant Number"] = clean_id(zoho["Merchant Number"])
-    zoho = zoho[zoho["Sales Id"].str.contains(r"[A-Za-z]", na=False)]
-    zoho = zoho[~zoho["Account Status"].str.lower().isin(["closed", "declined", "n/a", ""])]
-    
-    # Step 1 Mapping from MEX
+    # 3. MEX & Fees
     mex = pd.read_excel(files["MEX_file"])
     mex_cols = ["visa_base_rate_discount_rev", "mc_base_rate_discount_rev", "disc_base_rate_discount_rev", "amex_base_rate_discount_rev"]
     mex["step1_calc"] = mex[mex_cols].sum(axis=1)
     mex_lookup = mex.groupby("merchant_id")["step1_calc"].sum().to_dict()
+
+    # 4. Zoho Logic
+    zoho = pd.read_excel(files["Zoho_All_Fees"], skiprows=6)
+    zoho = clean_nbsp(zoho)
+    zoho["Merchant Number"] = clean_id(zoho["Merchant Number"])
     zoho["Step 1"] = zoho["Merchant Number"].map(lambda x: mex_lookup.get(int(x) if x.isdigit() else x, 0))
 
-    # 4. Wireless Count Logic
+    # 5. Valor ISO & Wireless
     wireless_raw = pd.read_excel(files["Zoho_Wireless"], skiprows=6)
     WCV = clean_nbsp(wireless_raw)
-    # Extracts Merchant Number and Wireless Count (matching notebook logic)
     WCV.rename(columns={WCV.columns[0]: "Mer_Wir", WCV.columns[5]: "MID"}, inplace=True)
     WCV["Wireless Count"] = WCV["Mer_Wir"].str.extract(r"\((\d+)\)")
     wireless_final = WCV[["MID", "Wireless Count"]].dropna().drop_duplicates(subset=["MID"])
 
-    # 5. Valor ISO Report
     valor = pd.read_excel(files["Valor"])
     valor = clean_nbsp(valor)
     valor["MID1"] = clean_id(valor["MID1"])
-    
-    # Prefix TSYS with 39 if missing
     tsys_mask = valor["PROCESSOR"].str.lower().str.contains("tsys", na=False)
     valor.loc[tsys_mask & ~valor["MID1"].str.startswith("39"), "MID1"] = "39" + valor["MID1"]
     
-    # Map Wireless Count into Valor
     wireless_dict = wireless_final.set_index("MID")["Wireless Count"].to_dict()
     valor["Wireless count"] = valor["MID1"].map(wireless_dict)
-    valor[" "] = "" # Extra blank column for parity
 
     # =============================
-    # Prepare Outputs
+    # Create File Dictionaries
     # =============================
-    outputs = {}
-    outputs["PASO_Output.csv"] = paso_output.to_csv(index=False).encode('utf-8')
-    outputs["MEX_Output.csv"] = mex.to_csv(index=False).encode('utf-8')
+    results = {}
+    results["PASO_Output.csv"] = paso_output.to_csv(index=False).encode('utf-8')
+    results["MEX_Output.csv"] = mex.to_csv(index=False).encode('utf-8')
     
-    # Monthly Min Excel
     min_buf = io.BytesIO()
     with pd.ExcelWriter(min_buf, engine='openpyxl') as writer:
         zoho[zoho["Processor"].str.lower() == "fiserv"].to_excel(writer, sheet_name="Fiserv", index=False)
         pd.DataFrame().to_excel(writer, sheet_name="Step1", index=False)
         zoho[zoho["Processor"].str.lower() == "tsys"].to_excel(writer, sheet_name="TSYS", index=False)
         mex.to_excel(writer, sheet_name="MEX", index=False)
-    outputs["Monthly_min_and_annual_PCI_without_Step1_Output.xlsx"] = min_buf.getvalue()
+    results["Monthly_Min_and_PCI_Output.xlsx"] = min_buf.getvalue()
 
-    # Valor Excel
     valor_buf = io.BytesIO()
     with pd.ExcelWriter(valor_buf, engine='openpyxl') as writer:
         valor.to_excel(writer, sheet_name="ISO Report", index=False)
         wireless_final.to_excel(writer, sheet_name="Wireless Count", index=False)
-    outputs["Valor_1ST_level_Output.xlsx"] = valor_buf.getvalue()
+    results["Valor_1ST_level_Output.xlsx"] = valor_buf.getvalue()
 
-    return outputs
+    return results
 
 # =============================
 # UI Components
@@ -162,10 +152,40 @@ if all([f_tsys, f_fiserv, f_zoho, f_mex, f_s1, f_s2, f_wireless, f_valor]):
             "PASO_S1": f_s1, "PASO_S2": f_s2,
             "Zoho_Wireless": f_wireless, "Valor": f_valor
         }
-        results = run_pipeline(files, selected_month_year, six_months_before)
-        
-        st.success("✅ All 4 Files Generated Successfully!")
-        
-        # Individual Downloads
+        # Run and save to session state
+        st.session_state.pipeline_results = run_pipeline(files, selected_month_year, six_months_before)
+        st.success("✅ Files generated! Download them below.")
+
+# =============================
+# Download Section
+# =============================
+if st.session_state.pipeline_results:
+    st.divider()
+    st.subheader("2. Download Results")
+    results = st.session_state.pipeline_results
+
+    # Single ZIP Download
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w") as zf:
         for name, data in results.items():
-            st.download_button(f"⬇️ Download {name}", data, file_name=name, use_container_width=True)
+            zf.writestr(name, data)
+    
+    st.download_button(
+        label="📦 Download ALL Files (ZIP)",
+        data=zip_buf.getvalue(),
+        file_name=f"Residuals_Step1_{selected_month_year.strftime('%Y_%m')}.zip",
+        mime="application/zip",
+        use_container_width=True,
+        type="primary"
+    )
+
+    st.markdown("---")
+    # Individual Downloads
+    cols = st.columns(2)
+    for i, (name, data) in enumerate(results.items()):
+        cols[i % 2].download_button(
+            label=f"⬇️ {name}",
+            data=data,
+            file_name=name,
+            use_container_width=True
+        )
