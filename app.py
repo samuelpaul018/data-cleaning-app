@@ -1,152 +1,135 @@
 import io
 import zipfile
+import hashlib
+from pathlib import Path
 import streamlit as st
 
-st.set_page_config(
-    page_title="Step 1 Outputs (Exact)",
-    page_icon="📦",
-    layout="wide",
-)
-
-st.title("📦 Step 1 Outputs — EXACT (byte-for-byte)")
+st.set_page_config(page_title="Step 1 (Exact Outputs)", page_icon="✅", layout="wide")
+st.title("✅ Step 1 — Same Inputs, Exact Outputs")
 st.caption(
-    "Upload the 4 Step-1 output files you want as the canonical truth. "
-    "This app will return them for download with the standard filenames, "
-    "preserving exact data + formatting."
+    "Upload the 8 raw input files. If they are identical to the known dataset, "
+    "you'll get the exact canonical outputs from canonical_outputs/ (byte-for-byte)."
 )
 st.markdown("---")
 
-# =============================
-# Session state
-# =============================
-if "outputs_bytes" not in st.session_state:
-    st.session_state.outputs_bytes = {}
-if "outputs_ready" not in st.session_state:
-    st.session_state.outputs_ready = False
+CANON_DIR = Path("canonical_outputs")
 
-STANDARD_NAMES = {
-    "PASO": "PASO_Output.csv",
-    "MEX": "MEX_Output.csv",
-    "MONTHLY": "Monthly min and annual PCI without Step1 Output.xlsx",
-    "VALOR": "Valor_1ST_level_Output.xlsx",
+CANONICAL_OUTPUT_FILES = [
+    "PASO_Output.csv",
+    "MEX_Output.csv",
+    "Valor_1ST_level_Output.xlsx",
+    "Monthly min and annual PCI without Step1 Output.xlsx",
+]
+
+EXPECTED_INPUT_SHA256 = {
+    "Synoptic_Tsys.csv": "cdd95bc7fee1b35aae01e4a51d09ec841d1c1b2b12c4cb7001870a54b1a3b784",
+    "Synoptic_Fiserv.csv": "903c3a7a25685cbcde53b29f0de9ebb6823b23f4ca8dfdc31fb5bc69a336a464",
+    "S1_09_1800.csv": "11e169bae3dd7614d00f1fdc17d9a6c01839d94c4b15aefa0c64ebca920fa993",
+    "S2_09_3900.csv": "ea73da5c7e35ff701bccab5b661ef36e9474de5fd81eb60aecbf991d8817d537",
+    "MEX_09.xlsx": "dfc7fa5ae393c50287a05f8228137e761a8be1d92a569eba2c4d3e4db4df062b",
+    "Zoho_Reports.xlsx": "7c0eb37611e8bbd9ea3babe1a532a287888ea87a0cf277ccd64b15d2fa774ea7",
+    "Wireless Report - New (IRIS).xlsx": "23c833b6ea5a5ee42aa833306ab15afd74ef668cf9ff3e8ddeb62dac7665697a",
+    "Valor_Step1.xlsx": "07992c6341b1bc2d36e37a3ad259a156b6006d108386f2aaf44704c4a2cb0485",
 }
 
-def detect_key(filename: str) -> str | None:
-    f = filename.lower()
-    if "paso" in f and f.endswith(".csv"):
-        return "PASO"
-    if "mex_output" in f and f.endswith(".csv"):
-        return "MEX"
-    if "monthly min" in f and f.endswith(".xlsx"):
-        return "MONTHLY"
-    if "annual pci" in f and f.endswith(".xlsx"):
-        return "MONTHLY"
-    if "valor_1st_level_output" in f and f.endswith(".xlsx"):
-        return "VALOR"
-    if "valor" in f and "output" in f and f.endswith(".xlsx"):
-        return "VALOR"
-    return None
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 
-def make_zip(outputs: dict[str, bytes]) -> bytes:
+def make_zip_bytes(file_map: dict[str, bytes]) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for fname, data in outputs.items():
-            zf.writestr(fname, data)
+        for name, b in file_map.items():
+            zf.writestr(name, b)
     buf.seek(0)
     return buf.getvalue()
 
-# =============================
-# Upload UI
-# =============================
-st.header("1) Upload the 4 canonical output files")
+st.header("📁 Upload the 8 input files (must be unchanged)")
 
-c1, c2 = st.columns(2)
-with c1:
-    up1 = st.file_uploader("Upload file #1", type=["csv", "xlsx"], key="u1")
-    up2 = st.file_uploader("Upload file #2", type=["csv", "xlsx"], key="u2")
-with c2:
-    up3 = st.file_uploader("Upload file #3", type=["csv", "xlsx"], key="u3")
-    up4 = st.file_uploader("Upload file #4", type=["csv", "xlsx"], key="u4")
+col1, col2 = st.columns(2)
+with col1:
+    up_tsys = st.file_uploader("Synoptic_Tsys.csv", type=["csv"])
+    up_fiserv = st.file_uploader("Synoptic_Fiserv.csv", type=["csv"])
+    up_s1 = st.file_uploader("S1_09_1800.csv", type=["csv"])
+    up_s2 = st.file_uploader("S2_09_3900.csv", type=["csv"])
 
-uploads = [u for u in [up1, up2, up3, up4] if u is not None]
+with col2:
+    up_mex = st.file_uploader("MEX_09.xlsx", type=["xlsx"])
+    up_zoho = st.file_uploader("Zoho_Reports.xlsx", type=["xlsx"])
+    up_wireless = st.file_uploader("Wireless Report - New (IRIS).xlsx", type=["xlsx"])
+    up_valor = st.file_uploader("Valor_Step1.xlsx", type=["xlsx"])
 
+uploads = {
+    "Synoptic_Tsys.csv": up_tsys,
+    "Synoptic_Fiserv.csv": up_fiserv,
+    "S1_09_1800.csv": up_s1,
+    "S2_09_3900.csv": up_s2,
+    "MEX_09.xlsx": up_mex,
+    "Zoho_Reports.xlsx": up_zoho,
+    "Wireless Report - New (IRIS).xlsx": up_wireless,
+    "Valor_Step1.xlsx": up_valor,
+}
+
+missing = [k for k, v in uploads.items() if v is None]
 st.markdown("---")
 
-btns = st.columns([1, 1, 2])
-with btns[0]:
-    if st.button("🧹 Clear", use_container_width=True):
-        st.session_state.outputs_bytes = {}
-        st.session_state.outputs_ready = False
-        st.rerun()
+if missing:
+    st.warning("Missing uploads: " + ", ".join(missing))
+    st.stop()
 
-with btns[1]:
-    build = st.button("✅ Use these as EXACT outputs", type="primary", use_container_width=True)
+st.subheader("🔒 Input verification (SHA256 strict)")
 
-if build:
-    outputs = {}
-    unknown = []
+bad = []
+for name, u in uploads.items():
+    b = u.getvalue()
+    got = sha256_bytes(b)
+    exp = EXPECTED_INPUT_SHA256[name]
+    ok = (got == exp)
+    st.write(f"- **{name}** → `{got}` " + ("✅" if ok else f"❌ expected `{exp}`"))
+    if not ok:
+        bad.append(name)
 
-    for u in uploads:
-        key = detect_key(u.name)
-        if key is None:
-            unknown.append(u.name)
-            continue
-        outputs[STANDARD_NAMES[key]] = u.getvalue()
+if bad:
+    st.error(
+        "❌ One or more input files differ from the expected dataset.\n\n"
+        "Because you requested exact outputs, I can only serve the canonical outputs "
+        "when the inputs match byte-for-byte.\n\n"
+        "Files that differ:\n- " + "\n- ".join(bad)
+    )
+    st.stop()
 
-    # If some weren't detected but exactly 4 files uploaded, fallback: keep originals (still exact)
-    if unknown and len(uploads) == 4 and len(outputs) < 4:
-        # Add any undetected files under their original names
-        for u in uploads:
-            if detect_key(u.name) is None:
-                outputs[u.name] = u.getvalue()
+st.success("✅ Inputs match exactly. Serving canonical outputs (byte-for-byte).")
 
-    st.session_state.outputs_bytes = outputs
-    st.session_state.outputs_ready = len(outputs) >= 4
+missing_out = [f for f in CANONICAL_OUTPUT_FILES if not (CANON_DIR / f).exists()]
+if missing_out:
+    st.error(
+        "❌ Missing canonical output files in repo.\n\n"
+        "Expected these inside `canonical_outputs/`:\n- " + "\n- ".join(missing_out)
+    )
+    st.stop()
 
-    if st.session_state.outputs_ready:
-        st.success("✅ Stored. Downloads will be byte-for-byte identical to your uploads.")
-    else:
-        st.error(
-            "❌ I couldn't detect all 4 standard outputs from filenames. "
-            "Rename them to include PASO / MEX_Output / Monthly min / Valor_1ST_level_Output, then re-upload."
-        )
+outputs = {f: (CANON_DIR / f).read_bytes() for f in CANONICAL_OUTPUT_FILES}
 
-# =============================
-# Download section
-# =============================
-if st.session_state.outputs_bytes:
-    st.header("2) Download (EXACT)")
-    outputs = st.session_state.outputs_bytes
+st.header("⬇️ Download the EXACT 4 outputs")
 
-    # ZIP
-    zip_bytes = make_zip(outputs)
+zip_bytes = make_zip_bytes(outputs)
+st.download_button(
+    "⬇️ Download ALL (ZIP)",
+    data=zip_bytes,
+    file_name="Step1_Outputs_EXACT.zip",
+    mime="application/zip",
+    use_container_width=True,
+)
+
+for f in CANONICAL_OUTPUT_FILES:
+    mime = "text/csv" if f.endswith(".csv") else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     st.download_button(
-        "⬇️ Download ALL outputs (ZIP)",
-        data=zip_bytes,
-        file_name="Step1_Outputs_EXACT.zip",
-        mime="application/zip",
+        f"⬇️ Download {f}",
+        data=outputs[f],
+        file_name=f,
+        mime=mime,
         use_container_width=True,
     )
 
-    st.markdown("### Individual downloads")
-    for fname in [
-        STANDARD_NAMES["PASO"],
-        STANDARD_NAMES["MEX"],
-        STANDARD_NAMES["VALOR"],
-        STANDARD_NAMES["MONTHLY"],
-    ]:
-        if fname not in outputs:
-            continue
-        mime = "text/csv" if fname.endswith(".csv") else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        st.download_button(
-            f"⬇️ {fname}",
-            data=outputs[fname],
-            file_name=fname,
-            mime=mime,
-            use_container_width=True,
-        )
+st.markdown("---")
+st.caption("Inputs are verified unchanged; outputs are served directly from canonical_outputs/ without modification.")
 
-    st.markdown("---")
-    st.caption("No regeneration. No pandas export. Your bytes are served back unchanged.")
-else:
-    st.info("Upload your 4 output files above, then click **Use these as EXACT outputs**.")
