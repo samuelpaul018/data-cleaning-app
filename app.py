@@ -1,5 +1,4 @@
 import io
-import os
 import zipfile
 import calendar
 from datetime import datetime
@@ -30,10 +29,8 @@ st.markdown("---")
 if "step1_outputs" not in st.session_state:
     # dict[str, bytes]
     st.session_state.step1_outputs = {}
-
 if "step1_ran" not in st.session_state:
     st.session_state.step1_ran = False
-
 if "last_run_meta" not in st.session_state:
     st.session_state.last_run_meta = {}
 
@@ -67,11 +64,14 @@ with st.sidebar:
 def to_csv_bytes(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8")
 
+
 def read_csv_bytes(uploaded_file, **kwargs) -> pd.DataFrame:
     return pd.read_csv(io.BytesIO(uploaded_file.getvalue()), **kwargs)
 
+
 def read_excel_bytes(uploaded_file, **kwargs) -> pd.DataFrame:
     return pd.read_excel(io.BytesIO(uploaded_file.getvalue()), **kwargs)
+
 
 def clean_nbsp(df: pd.DataFrame) -> pd.DataFrame:
     for col in df.columns:
@@ -86,12 +86,14 @@ def clean_nbsp(df: pd.DataFrame) -> pd.DataFrame:
             )
     return df
 
+
 def clean_id_numeric(s: pd.Series) -> pd.Series:
     s = s.astype("string").str.strip()
     s = s.str.replace(r"\.0+$", "", regex=True)
     s = s.str.replace(r"\D+", "", regex=True)
     s = s.replace("", pd.NA)
     return s
+
 
 # =============================
 # TSYS synoptic cleaning (Final.ipynb logic)
@@ -128,6 +130,7 @@ def clean_tsys_synoptic(tsys_df: pd.DataFrame, selected_month_year: pd.Timestamp
 
     return df
 
+
 # =============================
 # Fiserv synoptic cleaning (Final.ipynb logic)
 # =============================
@@ -150,11 +153,19 @@ def clean_fiserv_synoptic(
     if "Open Date" in df.columns:
         df = df.loc[~(df["Open Date"] > selected_month_year)].copy()
 
-    if "Merchant Status" in df.columns and "Close Date" in df.columns:
-        mask = (
-            df["Merchant Status"].fillna("").astype(str).str.strip().str.lower().eq("close")
-            & (df["Close Date"] > selected_month_year)
+    # IMPORTANT: detect "close", "closed", "close " etc.
+    def is_close(series: pd.Series) -> pd.Series:
+        return (
+            series.fillna("")
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .str.startswith("close")
         )
+
+    if "Merchant Status" in df.columns and "Close Date" in df.columns:
+        status_close = is_close(df["Merchant Status"])
+        mask = status_close & (df["Close Date"] > selected_month_year)
         df.loc[mask, "Merchant Status"] = "Open"
 
     # Sales Agent rule
@@ -179,19 +190,20 @@ def clean_fiserv_synoptic(
             .str.replace(r"\D+", "", regex=True)
         )
 
-    # Remove CLOSE merchants with old/blank Last Batch Activity (Final.ipynb behavior)
+    # ✅ PASO fix: remove CLOSE* merchants with old/blank Last Batch Activity (Final.ipynb behavior)
     if "Merchant Status" in df.columns and "Last Batch Activity" in df.columns:
-        status_close = df["Merchant Status"].fillna("").astype(str).str.strip().str.lower().eq("close")
+        status_close = is_close(df["Merchant Status"])
         lba = pd.to_datetime(df["Last Batch Activity"], errors="coerce")
         df = df.loc[~(status_close & (lba.isna() | (lba <= six_months_before)))].copy()
 
     # Closed merchants: keep only those present in PASO list
     if "Merchant Status" in df.columns and "Merchant #" in df.columns:
         paso_merchants = paso_all["MerchantNumber"].dropna().astype(str).str.strip().unique()
-        status_close = df["Merchant Status"].fillna("").astype(str).str.strip().str.lower().eq("close")
+        status_close = is_close(df["Merchant Status"])
         df = df.loc[(~status_close) | (df["Merchant #"].isin(paso_merchants))].copy()
 
     return df
+
 
 # =============================
 # Zoho processing (Final.ipynb logic)
@@ -276,6 +288,7 @@ def process_zoho(
 
     return z_fiserv, z_tsys, final_cols
 
+
 # =============================
 # MEX logic
 # =============================
@@ -289,6 +302,7 @@ def mex_for_monthly(mex_raw: pd.DataFrame) -> pd.DataFrame:
     reps = {"HUBW-0000000006", "HUBW-0000000124", "HUBW-0000000024"}
     m = m.loc[~m["sales_rep_number"].isin(reps)].copy()
     return m
+
 
 def apply_mex_step1_lookup(zoho_keep_tsys: pd.DataFrame, kept_mex: pd.DataFrame, final_cols: list[str]) -> pd.DataFrame:
     mex_cols = [
@@ -312,6 +326,7 @@ def apply_mex_step1_lookup(zoho_keep_tsys: pd.DataFrame, kept_mex: pd.DataFrame,
     z = z.drop(columns=["Merchant_clean"], errors="ignore")
     z = z.loc[:, final_cols].copy()
     return z
+
 
 def mex_output_csv(mex_raw: pd.DataFrame, six_months_before: pd.Timestamp) -> pd.DataFrame:
     MEX = mex_raw.copy()
@@ -344,6 +359,7 @@ def mex_output_csv(mex_raw: pd.DataFrame, six_months_before: pd.Timestamp) -> pd
 
     return kept_mex_1
 
+
 # =============================
 # Wireless count sheet
 # =============================
@@ -375,8 +391,9 @@ def build_wireless_count_sheet(wcv_raw: pd.DataFrame) -> pd.DataFrame:
 
     return result
 
+
 # =============================
-# Valor ISO report
+# Valor ISO report (with FIXES)
 # =============================
 def process_valor(valor_raw: pd.DataFrame, wireless_result: pd.DataFrame, kept_fiserv: pd.DataFrame, kept_tsys: pd.DataFrame) -> pd.DataFrame:
     Valor = valor_raw.copy()
@@ -390,12 +407,14 @@ def process_valor(valor_raw: pd.DataFrame, wireless_result: pd.DataFrame, kept_f
 
     Valor["Processor"] = Valor["PROCESSOR"].fillna("").astype(str).str.lower()
 
+    # ✅ FIX: only add 39 if not already present
     cond_tsys = Valor["Processor"].str.startswith("tsys")
-    mask_mid1 = cond_tsys & Valor["MID1"].ne("")
-    Valor.loc[mask_mid1, "MID1"] = "39" + Valor.loc[mask_mid1, "MID1"]
 
-    mask_mid2 = cond_tsys & Valor["MID1"].eq("") & Valor["MID2"].ne("")
-    Valor.loc[mask_mid2, "MID2"] = "39" + Valor.loc[mask_mid2, "MID2"]
+    mask_mid1 = cond_tsys & Valor["MID1"].ne("") & ~Valor["MID1"].astype(str).str.startswith("39")
+    Valor.loc[mask_mid1, "MID1"] = "39" + Valor.loc[mask_mid1, "MID1"].astype(str)
+
+    mask_mid2 = cond_tsys & Valor["MID1"].eq("") & Valor["MID2"].ne("") & ~Valor["MID2"].astype(str).str.startswith("39")
+    Valor.loc[mask_mid2, "MID2"] = "39" + Valor.loc[mask_mid2, "MID2"].astype(str)
 
     dba_norm = Valor["DBA NAME"].fillna("").astype(str).str.strip().str.lower()
     mask_webb = (dba_norm.str.startswith("webb")) | (dba_norm == "mailbox plus")
@@ -433,11 +452,11 @@ def process_valor(valor_raw: pd.DataFrame, wireless_result: pd.DataFrame, kept_f
 
     Valor.drop(columns=["Processor"], inplace=True, errors="ignore")
 
-    # Match notebook extra blank column named " "
-    if " " not in Valor.columns:
-        Valor[" "] = ""
+    # ✅ FIX: match notebook extra blank column named exactly " "
+    Valor[" "] = ""
 
     return Valor
+
 
 # =============================
 # Step-1 pipeline
@@ -445,6 +464,7 @@ def process_valor(valor_raw: pd.DataFrame, wireless_result: pd.DataFrame, kept_f
 def run_step1_pipeline(files: dict) -> dict[str, bytes]:
     outputs: dict[str, bytes] = {}
 
+    # Inputs
     tsys_raw = read_csv_bytes(files["Synoptic_TSYS"])
     fiserv_raw = read_csv_bytes(files["Synoptic_Fiserv"], skiprows=1, dtype=str)
 
@@ -455,11 +475,13 @@ def run_step1_pipeline(files: dict) -> dict[str, bytes]:
     kept_tsys = clean_tsys_synoptic(tsys_raw, selected_month_year, six_months_before)
     kept_fiserv = clean_fiserv_synoptic(fiserv_raw, selected_month_year, six_months_before, paso_all)
 
+    # PASO output
     kept_fiserv_mid = kept_fiserv["Merchant #"].astype("string").str.replace("\xa0", "", regex=False).str.strip()
     paso_all["MerchantNumber"] = paso_all["MerchantNumber"].astype("string").str.strip()
     paso_kept = paso_all.loc[paso_all["MerchantNumber"].isin(kept_fiserv_mid)].copy()
     outputs["PASO_Output.csv"] = to_csv_bytes(paso_kept)
 
+    # Zoho
     zoho_raw = read_excel_bytes(
         files["Zoho_All_Fees"],
         skiprows=6,
@@ -467,10 +489,12 @@ def run_step1_pipeline(files: dict) -> dict[str, bytes]:
     )
     zoho_keep_fiserv, zoho_keep_tsys, final_cols = process_zoho(zoho_raw, kept_tsys, kept_fiserv, selected_month_year)
 
+    # MEX monthly + Step1 lookup for TSYS zoho
     mex_raw = read_excel_bytes(files["MEX_file"])
     kept_mex_monthly = mex_for_monthly(mex_raw)
     zoho_keep_tsys = apply_mex_step1_lookup(zoho_keep_tsys, kept_mex_monthly, final_cols)
 
+    # Monthly min workbook
     monthly_buf = io.BytesIO()
     with pd.ExcelWriter(monthly_buf, engine="openpyxl") as writer:
         zoho_keep_fiserv.to_excel(writer, sheet_name="Fiserv", index=False)
@@ -482,12 +506,15 @@ def run_step1_pipeline(files: dict) -> dict[str, bytes]:
     monthly_buf.seek(0)
     outputs["Monthly min and annual PCI without Step1 Output.xlsx"] = monthly_buf.getvalue()
 
+    # MEX output CSV
     mex_out_df = mex_output_csv(mex_raw, six_months_before)
     outputs["MEX_Output.csv"] = to_csv_bytes(mex_out_df)
 
+    # Wireless
     wireless_raw = read_excel_bytes(files["Zoho_Wireless"], skiprows=6)
     wireless_result = build_wireless_count_sheet(wireless_raw)
 
+    # Valor
     valor_raw = read_excel_bytes(
         files["Valor"],
         converters={
@@ -508,6 +535,7 @@ def run_step1_pipeline(files: dict) -> dict[str, bytes]:
 
     return outputs
 
+
 def make_zip_bytes(outputs: dict[str, bytes]) -> bytes:
     zbuf = io.BytesIO()
     with zipfile.ZipFile(zbuf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -515,6 +543,7 @@ def make_zip_bytes(outputs: dict[str, bytes]) -> bytes:
             zf.writestr(fname, data)
     zbuf.seek(0)
     return zbuf.getvalue()
+
 
 # =============================
 # UI Uploaders (8 inputs)
@@ -553,7 +582,7 @@ files = {
 missing = [k for k, v in files.items() if v is None]
 st.markdown("---")
 
-# Optional: clear outputs
+# Clear outputs button
 c1, c2 = st.columns([1, 1])
 with c1:
     if st.button("🧹 Clear outputs / Start over", use_container_width=True):
@@ -624,5 +653,5 @@ if st.session_state.step1_ran and st.session_state.step1_outputs:
         )
 
 st.markdown("---")
-st.caption("Residuals Data Cleaning Pipeline — Step 1 (Final.ipynb aligned) • Downloads persist + ZIP enabled")
+st.caption("Residuals Data Cleaning Pipeline — Step 1 (Final.ipynb aligned) • Persistent downloads + ZIP")
 
