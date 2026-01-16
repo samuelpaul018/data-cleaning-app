@@ -27,7 +27,6 @@ st.markdown("---")
 # Session state (prevents reset on rerun/download)
 # =============================
 if "step1_outputs" not in st.session_state:
-    # dict[str, bytes]
     st.session_state.step1_outputs = {}
 if "step1_ran" not in st.session_state:
     st.session_state.step1_ran = False
@@ -95,6 +94,14 @@ def clean_id_numeric(s: pd.Series) -> pd.Series:
     return s
 
 
+def normalize_mid_series(s: pd.Series) -> pd.Series:
+    """Digits-only MID cleaning to match notebook behavior more reliably."""
+    s = s.fillna("").astype(str).str.strip()
+    s = s.str.replace(r"\.0+$", "", regex=True)
+    s = s.str.replace(r"\D+", "", regex=True)
+    return s
+
+
 # =============================
 # TSYS synoptic cleaning (Final.ipynb logic)
 # =============================
@@ -132,7 +139,7 @@ def clean_tsys_synoptic(tsys_df: pd.DataFrame, selected_month_year: pd.Timestamp
 
 
 # =============================
-# Fiserv synoptic cleaning (Final.ipynb logic)
+# Fiserv synoptic cleaning (Final.ipynb logic + PASO parity fix)
 # =============================
 def clean_fiserv_synoptic(
     fiserv_df: pd.DataFrame,
@@ -153,22 +160,22 @@ def clean_fiserv_synoptic(
     if "Open Date" in df.columns:
         df = df.loc[~(df["Open Date"] > selected_month_year)].copy()
 
-    # IMPORTANT: detect "close", "closed", "close " etc.
     def is_close(series: pd.Series) -> pd.Series:
         return (
             series.fillna("")
             .astype(str)
             .str.strip()
             .str.lower()
-            .str.startswith("close")
+            .eq("close")
         )
 
+    # if close date is in the future relative to month-end, treat as open
     if "Merchant Status" in df.columns and "Close Date" in df.columns:
         status_close = is_close(df["Merchant Status"])
         mask = status_close & (df["Close Date"] > selected_month_year)
         df.loc[mask, "Merchant Status"] = "Open"
 
-    # Sales Agent rule
+    # Sales Agent rule (same as notebook)
     if "Sales Agent" in df.columns:
         agent_keep = {"2030", "3030", "4030", "5030"}
         sa = df["Sales Agent"].fillna("").astype(str).str.strip()
@@ -190,17 +197,17 @@ def clean_fiserv_synoptic(
             .str.replace(r"\D+", "", regex=True)
         )
 
-    # ✅ PASO fix: remove CLOSE* merchants with old/blank Last Batch Activity (Final.ipynb behavior)
+    # remove CLOSE merchants with old/blank Last Batch Activity
     if "Merchant Status" in df.columns and "Last Batch Activity" in df.columns:
         status_close = is_close(df["Merchant Status"])
         lba = pd.to_datetime(df["Last Batch Activity"], errors="coerce")
         df = df.loc[~(status_close & (lba.isna() | (lba <= six_months_before)))].copy()
 
-    # Closed merchants: keep only those present in PASO list
-    if "Merchant Status" in df.columns and "Merchant #" in df.columns:
-        paso_merchants = paso_all["MerchantNumber"].dropna().astype(str).str.strip().unique()
+    # ✅ CRITICAL PARITY FIX for your Original PASO_Output:
+    # Drop all remaining CLOSE merchants entirely (they should NOT appear in PASO_Output Original)
+    if "Merchant Status" in df.columns:
         status_close = is_close(df["Merchant Status"])
-        df = df.loc[(~status_close) | (df["Merchant #"].isin(paso_merchants))].copy()
+        df = df.loc[~status_close].copy()
 
     return df
 
@@ -398,12 +405,13 @@ def build_wireless_count_sheet(wcv_raw: pd.DataFrame) -> pd.DataFrame:
 def process_valor(valor_raw: pd.DataFrame, wireless_result: pd.DataFrame, kept_fiserv: pd.DataFrame, kept_tsys: pd.DataFrame) -> pd.DataFrame:
     Valor = valor_raw.copy()
 
-    for col in ["MID1", "MID2", "PROCESSOR"]:
+    for col in ["MID1", "MID2", "PROCESSOR", "DBA NAME"]:
         if col in Valor.columns:
             Valor[col] = Valor[col].fillna("").astype(str).str.strip()
 
-    Valor["MID1"] = Valor["MID1"].astype(str).str.replace(r"\.0+$", "", regex=True)
-    Valor["MID2"] = Valor["MID2"].astype(str).str.replace(r"\.0+$", "", regex=True)
+    # robust MID cleaning
+    Valor["MID1"] = normalize_mid_series(Valor["MID1"])
+    Valor["MID2"] = normalize_mid_series(Valor["MID2"])
 
     Valor["Processor"] = Valor["PROCESSOR"].fillna("").astype(str).str.lower()
 
@@ -420,8 +428,8 @@ def process_valor(valor_raw: pd.DataFrame, wireless_result: pd.DataFrame, kept_f
     mask_webb = (dba_norm.str.startswith("webb")) | (dba_norm == "mailbox plus")
     Valor = Valor.loc[~mask_webb].copy()
 
-    kept_f_ids = kept_fiserv["Merchant #"].fillna("").astype(str).str.strip()
-    kept_t_ids = kept_tsys["Merchant ID"].fillna("").astype(str).str.strip()
+    kept_f_ids = normalize_mid_series(kept_fiserv["Merchant #"])
+    kept_t_ids = normalize_mid_series(kept_tsys["Merchant ID"])
 
     allowed = set(kept_f_ids) | set(kept_t_ids)
     allowed |= {("39" + x) for x in kept_t_ids if x and not str(x).startswith("39")}
@@ -452,7 +460,7 @@ def process_valor(valor_raw: pd.DataFrame, wireless_result: pd.DataFrame, kept_f
 
     Valor.drop(columns=["Processor"], inplace=True, errors="ignore")
 
-    # ✅ FIX: match notebook extra blank column named exactly " "
+    # ✅ FIX: match notebook extra blank column named exactly " " (single space) at END
     Valor[" "] = ""
 
     return Valor
@@ -464,7 +472,6 @@ def process_valor(valor_raw: pd.DataFrame, wireless_result: pd.DataFrame, kept_f
 def run_step1_pipeline(files: dict) -> dict[str, bytes]:
     outputs: dict[str, bytes] = {}
 
-    # Inputs
     tsys_raw = read_csv_bytes(files["Synoptic_TSYS"])
     fiserv_raw = read_csv_bytes(files["Synoptic_Fiserv"], skiprows=1, dtype=str)
 
@@ -528,7 +535,7 @@ def run_step1_pipeline(files: dict) -> dict[str, bytes]:
 
     valor_buf = io.BytesIO()
     with pd.ExcelWriter(valor_buf, engine="openpyxl") as writer:
-        valor_iso.drop(columns=["MID1_clean"], errors="ignore").to_excel(writer, sheet_name="ISO Report", index=False)
+        valor_iso.to_excel(writer, sheet_name="ISO Report", index=False)
         wireless_result.to_excel(writer, sheet_name="Wireless Count", index=False)
     valor_buf.seek(0)
     outputs["Valor_1ST_level_Output.xlsx"] = valor_buf.getvalue()
@@ -582,7 +589,6 @@ files = {
 missing = [k for k, v in files.items() if v is None]
 st.markdown("---")
 
-# Clear outputs button
 c1, c2 = st.columns([1, 1])
 with c1:
     if st.button("🧹 Clear outputs / Start over", use_container_width=True):
@@ -622,7 +628,6 @@ if st.session_state.step1_ran and st.session_state.step1_outputs:
 
     outputs = st.session_state.step1_outputs
 
-    # Download ALL at once
     zip_bytes = make_zip_bytes(outputs)
     st.download_button(
         label="⬇️ Download ALL outputs (ZIP)",
