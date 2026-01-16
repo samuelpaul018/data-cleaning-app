@@ -2,83 +2,33 @@ import io
 import zipfile
 import calendar
 from datetime import datetime
-
 import pandas as pd
 import streamlit as st
-from pandas.tseries.offsets import MonthEnd
+from pandas.tseries.offsets import MonthEnd, DateOffset
 
 # =============================
-# Page setup
+# Page Setup
 # =============================
 st.set_page_config(
-    page_title="Residuals Data Cleaning Pipeline (Step 1)",
-    page_icon="🧹",
-    layout="wide",
+    page_title="Residuals Data Cleaning Pipeline",
+    page_icon="🔧",
+    layout="wide"
 )
 
-st.title("🧹 Residuals Data Cleaning Pipeline — Step 1 (Final.ipynb aligned)")
-st.caption(
-    "Generates: PASO_Output.csv, MEX_Output.csv, Valor_1ST_level_Output.xlsx, "
-    "Monthly min and annual PCI without Step1 Output.xlsx"
-)
+st.title("🔧 Residuals Data Cleaning Pipeline")
 st.markdown("---")
 
 # =============================
-# Session state (prevents reset on rerun/download)
+# Helper Functions
 # =============================
-if "step1_outputs" not in st.session_state:
-    st.session_state.step1_outputs = {}
-if "step1_ran" not in st.session_state:
-    st.session_state.step1_ran = False
-if "last_run_meta" not in st.session_state:
-    st.session_state.last_run_meta = {}
 
-# =============================
-# Sidebar: Month/Year
-# =============================
-with st.sidebar:
-    st.header("⚙️ Settings")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        month = st.selectbox(
-            "Month",
-            list(range(1, 13)),
-            index=datetime.now().month - 1,
-            format_func=lambda m: datetime(2000, m, 1).strftime("%B"),
-        )
-    with col2:
-        year = st.selectbox("Year", list(range(2020, 2031)), index=(datetime.now().year - 2020))
-
-    last_day = calendar.monthrange(year, month)[1]
-    selected_month_year = pd.Timestamp(year=year, month=month, day=last_day)
-    six_months_before = selected_month_year - pd.DateOffset(months=6) + MonthEnd(0)
-
-    st.info(f"Selected month-end: **{selected_month_year.date()}**")
-    st.info(f"Six months before (month-end): **{six_months_before.date()}**")
-
-# =============================
-# Helpers
-# =============================
-def to_csv_bytes(df: pd.DataFrame) -> bytes:
-    return df.to_csv(index=False).encode("utf-8")
-
-
-def read_csv_bytes(uploaded_file, **kwargs) -> pd.DataFrame:
-    return pd.read_csv(io.BytesIO(uploaded_file.getvalue()), **kwargs)
-
-
-def read_excel_bytes(uploaded_file, **kwargs) -> pd.DataFrame:
-    return pd.read_excel(io.BytesIO(uploaded_file.getvalue()), **kwargs)
-
-
-def clean_nbsp(df: pd.DataFrame) -> pd.DataFrame:
+def clean_nbsp(df):
+    """Remove non-breaking spaces and special characters"""
     for col in df.columns:
         if df[col].dtype == "object":
             df[col] = (
                 df[col]
                 .fillna("")
-                .astype(str)
                 .str.replace("\xa0", "", regex=False)
                 .str.replace("Â", "", regex=False)
                 .str.strip()
@@ -86,577 +36,489 @@ def clean_nbsp(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def clean_id_numeric(s: pd.Series) -> pd.Series:
-    s = s.astype("string").str.strip()
-    s = s.str.replace(r"\.0+$", "", regex=True)
-    s = s.str.replace(r"\D+", "", regex=True)
-    s = s.replace("", pd.NA)
-    return s
-
-
-def normalize_mid_series(s: pd.Series) -> pd.Series:
-    """Digits-only MID cleaning to match notebook behavior more reliably."""
-    s = s.fillna("").astype(str).str.strip()
-    s = s.str.replace(r"\.0+$", "", regex=True)
-    s = s.str.replace(r"\D+", "", regex=True)
-    return s
-
-
-# =============================
-# TSYS synoptic cleaning (Final.ipynb logic)
-# =============================
-def clean_tsys_synoptic(tsys_df: pd.DataFrame, selected_month_year: pd.Timestamp, six_months_before: pd.Timestamp) -> pd.DataFrame:
-    df = tsys_df.copy()
-
-    for c in ["Date Opened", "Date Closed", "Last Deposit Date"]:
-        if c in df.columns:
-            df[c] = pd.to_datetime(df[c], errors="coerce")
-
-    if "Date Opened" in df.columns:
-        df = df.loc[~(df["Date Opened"] > selected_month_year)].copy()
-
-    if "Status" in df.columns and "Date Closed" in df.columns:
-        mask = (df["Status"].astype(str).str.strip().str.lower() == "closed") & (df["Date Closed"] > selected_month_year)
-        df.loc[mask, "Status"] = "Open"
-
-    if "Status" in df.columns and "Last Deposit Date" in df.columns:
-        status_closed = df["Status"].astype(str).str.strip().str.lower().eq("closed")
-        mask_remove = status_closed & (df["Last Deposit Date"].isna() | (df["Last Deposit Date"] <= six_months_before))
-        df = df.loc[~mask_remove].copy()
-
-    if "Status" in df.columns:
-        rm = {"closed", "declined", "cancelled"}
-        df = df.loc[~df["Status"].astype(str).str.strip().str.lower().isin(rm)].copy()
-
-    if "Rep Name" in df.columns:
-        hard = {"hubwallet", "stephany perez", "nigel westbury", "brandon casillas"}
-        df = df.loc[~df["Rep Name"].astype(str).str.strip().str.lower().isin(hard)].copy()
-
-    if "Merchant ID" in df.columns:
-        df = df.drop_duplicates(subset=["Merchant ID"], keep="first")
-
-    return df
-
-
-# =============================
-# Fiserv synoptic cleaning (Final.ipynb logic + PASO parity fix)
-# =============================
-def clean_fiserv_synoptic(
-    fiserv_df: pd.DataFrame,
-    selected_month_year: pd.Timestamp,
-    six_months_before: pd.Timestamp,
-    paso_all: pd.DataFrame
-) -> pd.DataFrame:
-    df = fiserv_df.copy()
-    df = clean_nbsp(df)
-
-    if "Merchant #" in df.columns:
-        df = df.drop_duplicates(subset=["Merchant #"])
-
-    for c in ["Open Date", "Close Date", "Last Batch Activity"]:
-        if c in df.columns:
-            df[c] = pd.to_datetime(df[c], errors="coerce")
-
-    if "Open Date" in df.columns:
-        df = df.loc[~(df["Open Date"] > selected_month_year)].copy()
-
-    def is_close(series: pd.Series) -> pd.Series:
-        return (
-            series.fillna("")
-            .astype(str)
-            .str.strip()
-            .str.lower()
-            .eq("close")
-        )
-
-    # if close date is in the future relative to month-end, treat as open
-    if "Merchant Status" in df.columns and "Close Date" in df.columns:
-        status_close = is_close(df["Merchant Status"])
-        mask = status_close & (df["Close Date"] > selected_month_year)
-        df.loc[mask, "Merchant Status"] = "Open"
-
-    # Sales Agent rule (same as notebook)
-    if "Sales Agent" in df.columns:
-        agent_keep = {"2030", "3030", "4030", "5030"}
-        sa = df["Sales Agent"].fillna("").astype(str).str.strip()
-
-        mask_numeric = sa.str.fullmatch(r"\d+", na=False)
-        mask_has_letter = sa.str.contains(r"[A-Za-z]", regex=True, na=False)
-        mask_numeric_keep = mask_numeric & sa.isin(agent_keep)
-
-        keep_mask = mask_has_letter | mask_numeric_keep
-        df = df.loc[keep_mask].copy()
-
-        df = df.loc[~df["Sales Agent"].fillna("").astype(str).str.strip().isin({"IS02"})].copy()
-
-    # Merchant # digits only
-    if "Merchant #" in df.columns:
-        df["Merchant #"] = (
-            df["Merchant #"].fillna("").astype(str).str.strip()
-            .str.encode("ascii", "ignore").str.decode("ascii")
-            .str.replace(r"\D+", "", regex=True)
-        )
-
-    # remove CLOSE merchants with old/blank Last Batch Activity
-    if "Merchant Status" in df.columns and "Last Batch Activity" in df.columns:
-        status_close = is_close(df["Merchant Status"])
-        lba = pd.to_datetime(df["Last Batch Activity"], errors="coerce")
-        df = df.loc[~(status_close & (lba.isna() | (lba <= six_months_before)))].copy()
-
-    # ✅ CRITICAL PARITY FIX for your Original PASO_Output:
-    # Drop all remaining CLOSE merchants entirely (they should NOT appear in PASO_Output Original)
-    if "Merchant Status" in df.columns:
-        status_close = is_close(df["Merchant Status"])
-        df = df.loc[~status_close].copy()
-
-    return df
-
-
-# =============================
-# Zoho processing (Final.ipynb logic)
-# =============================
-def process_zoho(
-    zoho_raw: pd.DataFrame,
-    kept_tsys: pd.DataFrame,
-    kept_fiserv: pd.DataFrame,
-    selected_month_year: pd.Timestamp
-):
-    z = zoho_raw.copy()
-
-    for c in ["Date Approved", "Date Closed"]:
-        if c in z.columns:
-            z[c] = pd.to_datetime(z[c], errors="coerce")
-
-    z["Sales Id"] = z.get("Sales Id", "").fillna("").astype("string").str.strip()
-    z["Merchant Number"] = z.get("Merchant Number", "").fillna("").astype("string").str.strip()
-    z["Account Status"] = z.get("Account Status", "").fillna("").astype("string").str.strip()
-
-    mask_has_letter = z["Sales Id"].str.contains(r"[A-Za-z]", regex=True, na=False)
-    z = z.loc[mask_has_letter].copy()
-
-    if "Date Approved" in z.columns:
-        z = z.loc[~(z["Date Approved"] > selected_month_year)].copy()
-
-    if "Date Closed" in z.columns:
-        mask = (z["Account Status"].str.lower() == "closed") & (z["Date Closed"] > selected_month_year)
-        z.loc[mask, "Account Status"] = "Approved"
-
-    statuses_to_remove = {"closed", "declined", "n/a", ""}
-    z = z.loc[~z["Account Status"].str.lower().isin(statuses_to_remove)].copy()
-
-    z = z.loc[~z["Sales Id"].str.lower().isin({"is20"})].copy()
-
-    zoho_ids = clean_id_numeric(z["Merchant Number"])
-    tsys_ids = clean_id_numeric(kept_tsys["Merchant ID"])
-    fiserv_ids = clean_id_numeric(kept_fiserv["Merchant #"])
-    valid = pd.Index(tsys_ids.dropna().unique()).union(pd.Index(fiserv_ids.dropna().unique()))
-    z = z.loc[zoho_ids.isin(valid)].copy()
-
-    agents_to_remove = {"IS20", "IS21", "IS22", "IS23", "IS24"}
-    z = z.loc[~z["Sales Id"].isin(agents_to_remove)].copy()
-
-    z["Recurring Fee Code"] = 2
-    z["Step 1"] = ""
-
-    if "Annual PCI Fee Month to Charge" in z.columns:
-        z = z.rename(columns={"Annual PCI Fee Month to Charge": "Recurring Fee Month"})
-    if "Monthly Minimum MPA" in z.columns:
-        z = z.rename(columns={"Monthly Minimum MPA": "Monthly Minimum"})
-
-    z["Recurring Fee Month"] = pd.to_numeric(z.get("Recurring Fee Month", 0), errors="coerce").fillna(0).astype(int)
-
-    selected_month = selected_month_year.month
-    z["PCI Count"] = (z["Recurring Fee Month"].astype(str).str.strip() == str(selected_month)).astype(int)
-
-    final_cols = [
-        "Processor",
-        "Outside Agents",
-        "Sales Id",
-        "Merchant Number",
-        "Account Name",
-        "Account Status",
-        "Date Approved",
-        "Date Closed",
-        "Recurring Fee Code",
-        "Recurring Fee Month",
-        "PCI Count",
-        "PCI Amnt",
-        "Monthly Minimum",
-        "Step 1",
-    ]
-    z = z.loc[:, final_cols].copy()
-
-    z["Date Approved"] = pd.to_datetime(z["Date Approved"], errors="coerce").dt.strftime("%m/%d/%Y")
-    z["Date Closed"] = pd.to_datetime(z["Date Closed"], errors="coerce").dt.strftime("%m/%d/%Y")
-
-    proc = z["Processor"].fillna("").astype(str).str.strip().str.lower()
-    z_fiserv = z.loc[proc.eq("fiserv")].copy()
-    z_tsys = z.loc[proc.eq("tsys")].copy()
-
-    return z_fiserv, z_tsys, final_cols
-
-
-# =============================
-# MEX logic
-# =============================
-def mex_for_monthly(mex_raw: pd.DataFrame) -> pd.DataFrame:
-    m = mex_raw.copy()
-    m["sales_rep_number"] = m["sales_rep_number"].astype(str).str.strip()
-
-    keep = m["merchant_status"].fillna("").astype(str).str.strip().str.lower() != "c"
-    m = m.loc[keep].copy()
-
-    reps = {"HUBW-0000000006", "HUBW-0000000124", "HUBW-0000000024"}
-    m = m.loc[~m["sales_rep_number"].isin(reps)].copy()
-    return m
-
-
-def apply_mex_step1_lookup(zoho_keep_tsys: pd.DataFrame, kept_mex: pd.DataFrame, final_cols: list[str]) -> pd.DataFrame:
-    mex_cols = [
-        "visa_base_rate_discount_rev",
-        "mc_base_rate_discount_rev",
-        "disc_base_rate_discount_rev",
-        "amex_base_rate_discount_rev",
-    ]
-    m = kept_mex.copy()
-    m[mex_cols] = m[mex_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
-
-    m["merchant_id_clean"] = m["merchant_id"].astype(str).str.strip()
-    m["mex_step1"] = m[mex_cols].sum(axis=1)
-
-    lookup = m.groupby("merchant_id_clean")["mex_step1"].sum()
-
-    z = zoho_keep_tsys.copy()
-    z["Merchant_clean"] = z["Merchant Number"].astype(str).str.strip()
-    z["Step 1"] = z["Merchant_clean"].map(lookup).fillna(0)
-
-    z = z.drop(columns=["Merchant_clean"], errors="ignore")
-    z = z.loc[:, final_cols].copy()
-    return z
-
-
-def mex_output_csv(mex_raw: pd.DataFrame, six_months_before: pd.Timestamp) -> pd.DataFrame:
-    MEX = mex_raw.copy()
-    MEX["sales_rep_number"] = MEX["sales_rep_number"].astype(str).str.strip()
-
-    status_c = MEX["merchant_status"].fillna("").astype(str).str.strip().str.lower().eq("c")
-    removed_mex = MEX.loc[status_c].copy()
-    kept_mex_1 = MEX.loc[~status_c].copy()
-
-    cols_to_check = ["total_settle_tickets", "net_settle_volume", "merchant_total_revenue", "STW_total_residual"]
-    for c in cols_to_check:
-        if c in removed_mex.columns:
-            removed_mex[c] = pd.to_numeric(removed_mex[c], errors="coerce")
-
-    last_dep = pd.to_datetime(removed_mex.get("last_deposit_date"), errors="coerce")
-    mask_back = (
-        removed_mex["merchant_status"].fillna("").astype(str).str.strip().str.lower().eq("c")
-        & (last_dep < six_months_before)
-        & (removed_mex[cols_to_check].fillna(0).ne(0).any(axis=1))
+def clean_tsys_synoptic(df, selected_month_year, six_months_before):
+    """Clean TSYS Synoptic data"""
+    # Convert date columns
+    cols = ["Date Opened", "Date Closed", "Last Deposit Date"]
+    df[cols] = df[cols].apply(pd.to_datetime, errors="coerce")
+    
+    # 1) REMOVE: Date Opened > selected_month_year
+    mask_remove = (df["Date Opened"] > selected_month_year)
+    removed_tsys = df.loc[mask_remove].copy()
+    kept_tsys = df.loc[~mask_remove].copy()
+    
+    # 2) Reopen if closed AND Date Closed > selected_month_year
+    mask_reopen = (
+        kept_tsys["Status"].fillna("").astype(str).str.strip().str.lower().eq("closed") &
+        (kept_tsys["Date Closed"] > selected_month_year)
     )
-
-    to_keep = removed_mex.loc[mask_back].copy()
-    removed_mex = removed_mex.loc[~mask_back].copy()
-
-    kept_mex_1 = pd.concat([kept_mex_1, to_keep], ignore_index=True)
-
-    sales_rep_numbers = ["HUBW-0000000006", "HUBW-0000000124"]
-    mask_remove_rep = kept_mex_1["sales_rep_number"].isin(sales_rep_numbers)
-    kept_mex_1 = kept_mex_1.loc[~mask_remove_rep].copy()
-
-    return kept_mex_1
-
-
-# =============================
-# Wireless count sheet
-# =============================
-def build_wireless_count_sheet(wcv_raw: pd.DataFrame) -> pd.DataFrame:
-    WCV = wcv_raw.copy()
-
-    WCV.rename(columns={WCV.columns[0]: "Mer + wir"}, inplace=True)
-    if len(WCV.columns) >= 6:
-        WCV.rename(columns={WCV.columns[5]: "Merchant Number"}, inplace=True)
-
-    A = WCV["Mer + wir"].astype("string")
-    mid_A = A.str.extract(r"(\d+)")[0]
-    cnt_A = A.str.extract(r"\(\s*([^)]+)\s*\)")[0]
-
-    lookup = pd.Series(cnt_A.values, index=mid_A).dropna()
-    lookup = lookup[~lookup.index.duplicated(keep="first")]
-
-    mid_F = WCV["Merchant Number"].astype("string").str.extract(r"(\d+)")[0]
-    wireless_count = mid_F.map(lookup)
-
-    acct_col = "Account Name" if "Account Name" in WCV.columns else WCV.columns[1]
-    result = pd.DataFrame(
-        {
-            "Merchant Number": mid_F,
-            "Account Name": WCV[acct_col].astype("string"),
-            "Wireless Count": wireless_count.astype("string"),
-        }
-    ).dropna(subset=["Merchant Number"]).drop_duplicates(subset=["Merchant Number"], keep="first").reset_index(drop=True)
-
-    return result
+    kept_tsys.loc[mask_reopen, "Status"] = "Open"
+    
+    # 3) Remove closed with no/old deposit
+    status_closed = kept_tsys["Status"].fillna("").astype(str).str.strip().str.lower().eq("closed")
+    mask_no_deposit = kept_tsys["Last Deposit Date"].isna()
+    mask_old_deposit = kept_tsys["Last Deposit Date"] <= six_months_before
+    mask_remove_2 = status_closed & (mask_no_deposit | mask_old_deposit)
+    
+    removed_tsys = pd.concat([removed_tsys, kept_tsys.loc[mask_remove_2]], ignore_index=False)
+    kept_tsys = kept_tsys.loc[~mask_remove_2].copy()
+    
+    # 4) Remove specific statuses
+    statuses_to_remove = {"closed", "declined", "cancelled"}
+    mask_remove_3 = kept_tsys["Status"].fillna("").astype(str).str.strip().str.lower().isin(statuses_to_remove)
+    
+    removed_tsys = pd.concat([removed_tsys, kept_tsys.loc[mask_remove_3]], ignore_index=False)
+    kept_tsys = kept_tsys.loc[~mask_remove_3].copy()
+    
+    # 5) Hard remove by Rep Name
+    sa = kept_tsys["Rep Name"].fillna("").astype(str).str.strip().str.lower()
+    Agent_hard_remove = {"hubwallet", "stephany perez", "nigel westbury", "brandon casillas"}
+    mask_hard_remove = sa.isin(Agent_hard_remove)
+    
+    removed_tsys = pd.concat([removed_tsys, kept_tsys.loc[mask_hard_remove]], ignore_index=False)
+    kept_tsys = kept_tsys.loc[~mask_hard_remove].copy()
+    
+    # Remove duplicates
+    kept_tsys = kept_tsys.drop_duplicates(subset=["Merchant ID"], keep="first").copy()
+    
+    return kept_tsys, removed_tsys
 
 
-# =============================
-# Valor ISO report (with FIXES)
-# =============================
-def process_valor(valor_raw: pd.DataFrame, wireless_result: pd.DataFrame, kept_fiserv: pd.DataFrame, kept_tsys: pd.DataFrame) -> pd.DataFrame:
-    Valor = valor_raw.copy()
+def clean_fiserv_synoptic(df, paso_df, selected_month_year, six_months_before):
+    """Clean Fiserv Synoptic data"""
+    df = clean_nbsp(df)
+    df = df.drop_duplicates(subset="Merchant #")
+    
+    # Convert dates
+    cols = ["Open Date", "Close Date", "Last Batch Activity"]
+    df[cols] = df[cols].apply(pd.to_datetime, errors="coerce")
+    
+    # 1) Remove: Open Date > selected_month_year
+    mask_remove = (df["Open Date"] > selected_month_year)
+    removed_fiserv = df.loc[mask_remove].copy()
+    Kept_fiserv = df.loc[~mask_remove].copy()
+    
+    # 2) Reopen if close AND Close Date > selected_month_year
+    mask_reopen = (
+        Kept_fiserv["Merchant Status"].fillna("").astype(str).str.strip().str.lower().eq("close") &
+        (Kept_fiserv["Close Date"] > selected_month_year)
+    )
+    Kept_fiserv.loc[mask_reopen, "Merchant Status"] = "Open"
+    
+    # 3) Sales Agent filtering
+    Agent_to_keep = {"2030", "3030", "4030", "5030"}
+    sa = Kept_fiserv["Sales Agent"].fillna("").astype(str).str.strip()
+    
+    mask_numeric = sa.str.fullmatch(r"\d+", na=False)
+    mask_has_letter = sa.str.contains(r"[A-Za-z]", regex=True, na=False)
+    mask_numeric_and_keep = mask_numeric & sa.isin(Agent_to_keep)
+    
+    mask_keep_agent = mask_has_letter | mask_numeric_and_keep
+    mask_remove_agent = ~mask_keep_agent
+    
+    removed_fiserv = pd.concat([removed_fiserv, Kept_fiserv.loc[mask_remove_agent]], ignore_index=False)
+    Kept_fiserv = Kept_fiserv.loc[~mask_remove_agent].copy()
+    
+    # Hard remove IS02
+    sa = Kept_fiserv["Sales Agent"].fillna("").astype(str).str.strip()
+    Agent_hard_remove = {"IS02"}
+    mask_hard_remove = sa.isin(Agent_hard_remove)
+    
+    removed_fiserv = pd.concat([removed_fiserv, Kept_fiserv.loc[mask_hard_remove]], ignore_index=False)
+    Kept_fiserv = Kept_fiserv.loc[~mask_hard_remove].copy()
+    
+    # Clean Merchant #
+    Kept_fiserv["Merchant #"] = (
+        Kept_fiserv["Merchant #"]
+        .astype(str)
+        .str.encode("ascii", "ignore")
+        .str.decode("ascii")
+        .str.replace(r"\D+", "", regex=True)
+    )
+    
+    # 4) CRITICAL: Keep closed merchants that exist in PASO
+    status_close = (Kept_fiserv["Merchant Status"].fillna("").astype(str).str.strip().str.lower().eq("close"))
+    closed_subset = Kept_fiserv.loc[status_close].copy()
+    
+    # Get PASO merchants
+    paso_merchants = paso_df["MerchantNumber"].dropna().astype(str).str.strip().unique()
+    
+    # Check if closed merchants exist in PASO
+    closed_in_paso = closed_subset["Merchant #"].isin(paso_merchants)
+    
+    # Remove closed NOT in PASO
+    removed_fiserv = pd.concat([removed_fiserv, closed_subset.loc[~closed_in_paso]], ignore_index=False)
+    
+    # Keep: all OPEN + CLOSED in PASO
+    Kept_fiserv = Kept_fiserv.loc[
+        (~status_close) | (Kept_fiserv["Merchant #"].isin(paso_merchants))
+    ].copy()
+    
+    return Kept_fiserv, removed_fiserv
 
-    for col in ["MID1", "MID2", "PROCESSOR", "DBA NAME"]:
-        if col in Valor.columns:
-            Valor[col] = Valor[col].fillna("").astype(str).str.strip()
 
-    # robust MID cleaning
-    Valor["MID1"] = normalize_mid_series(Valor["MID1"])
-    Valor["MID2"] = normalize_mid_series(Valor["MID2"])
+def process_paso(paso_s1_df, paso_s2_df, kept_fiserv_df):
+    """Process PASO files"""
+    paso_s1 = clean_nbsp(paso_s1_df)
+    paso_s2 = clean_nbsp(paso_s2_df)
+    
+    PASO = pd.concat([paso_s1, paso_s2], ignore_index=True)
+    
+    # Clean merchant numbers
+    kept_fiserv_df['Merchant #'] = (
+        kept_fiserv_df['Merchant #'].astype("string").str.replace("\xa0", "", regex=False).str.strip()
+    )
+    PASO["MerchantNumber"] = PASO["MerchantNumber"].astype("string").str.strip()
+    
+    # Keep only PASO merchants in Fiserv
+    PASO_kept = PASO[PASO['MerchantNumber'].isin(kept_fiserv_df['Merchant #'])]
+    
+    return PASO_kept
 
-    Valor["Processor"] = Valor["PROCESSOR"].fillna("").astype(str).str.lower()
 
-    # ✅ FIX: only add 39 if not already present
-    cond_tsys = Valor["Processor"].str.startswith("tsys")
+def clean_zoho(df, selected_month_year, six_months_before):
+    """Clean Zoho Reports"""
+    # Internal agents list (empty per notebook)
+    internal_agents = []
+    internal_set = {str(x).strip() for x in internal_agents}
+    
+    # Normalize columns
+    df["Sales Id"] = df["Sales Id"].fillna("").astype("string").str.strip()
+    df["Merchant Number"] = df["Merchant Number"].fillna("").astype("string").str.strip()
+    df["Account Status"] = df["Account Status"].fillna("").astype("string").str.strip()
+    
+    # Date columns
+    cols = ["Date Approved", "Date Closed"]
+    df[cols] = df[cols].apply(pd.to_datetime, errors="coerce")
+    
+    Zoho_kept = df.copy()
+    Zoho_remove = df.iloc[0:0].copy()
+    
+    # 1) Sales Id filtering
+    mask_numeric = Zoho_kept["Sales Id"].str.fullmatch(r"\d+")
+    mask_has_letter = Zoho_kept["Sales Id"].str.contains(r"[A-Za-z]", regex=True)
+    mask_numeric_and_internal = mask_numeric & Zoho_kept["Sales Id"].isin(internal_set)
+    
+    mask_keep_salesid = mask_has_letter | mask_numeric_and_internal
+    mask_remove_salesid = ~mask_keep_salesid
+    
+    Zoho_remove = pd.concat([Zoho_remove, Zoho_kept[mask_remove_salesid]], ignore_index=False)
+    Zoho_kept = Zoho_kept[~mask_remove_salesid].copy()
+    
+    # 2) Date Approved > selected_month_year
+    mask_remove_date = (Zoho_kept["Date Approved"] > selected_month_year)
+    Zoho_remove = pd.concat([Zoho_remove, Zoho_kept[mask_remove_date]], ignore_index=False)
+    Zoho_kept = Zoho_kept[~mask_remove_date].copy()
+    
+    # 3) Reopen closed if Date Closed > selected_month_year
+    mask_reopen = (
+        (Zoho_kept["Account Status"].str.lower() == "closed") &
+        (Zoho_kept["Date Closed"] > selected_month_year)
+    )
+    Zoho_kept.loc[mask_reopen, "Account Status"] = "Approved"
+    
+    # 4) Remove certain statuses
+    statuses_to_remove = ["closed", "declined", "n/a", ""]
+    mask_remove_status = Zoho_kept["Account Status"].str.lower().isin(statuses_to_remove)
+    Zoho_remove = pd.concat([Zoho_remove, Zoho_kept[mask_remove_status]], ignore_index=False)
+    Zoho_kept = Zoho_kept[~mask_remove_status].copy()
+    
+    # 5) Remove numeric Sales Id except internal
+    sid = Zoho_kept["Sales Id"].astype("string").str.strip()
+    mask_numeric_sid = sid.str.fullmatch(r"\d+")
+    mask_remove_numeric = mask_numeric_sid & (~sid.isin(internal_set))
+    Zoho_remove = pd.concat([Zoho_remove, Zoho_kept[mask_remove_numeric]], ignore_index=False)
+    Zoho_kept = Zoho_kept[~mask_remove_numeric].copy()
+    
+    # 6) Hard remove is20
+    sid2 = Zoho_kept["Sales Id"].astype("string").str.strip().str.lower()
+    Zoho_hard_remove = {"is20"}
+    mask_hard = sid2.isin(Zoho_hard_remove)
+    Zoho_remove = pd.concat([Zoho_remove, Zoho_kept[mask_hard]], ignore_index=False)
+    Zoho_kept = Zoho_kept[~mask_hard].copy()
+    
+    return Zoho_kept, Zoho_remove
 
-    mask_mid1 = cond_tsys & Valor["MID1"].ne("") & ~Valor["MID1"].astype(str).str.startswith("39")
-    Valor.loc[mask_mid1, "MID1"] = "39" + Valor.loc[mask_mid1, "MID1"].astype(str)
 
-    mask_mid2 = cond_tsys & Valor["MID1"].eq("") & Valor["MID2"].ne("") & ~Valor["MID2"].astype(str).str.startswith("39")
-    Valor.loc[mask_mid2, "MID2"] = "39" + Valor.loc[mask_mid2, "MID2"].astype(str)
+def filter_zoho_by_processors(zoho_df, tsys_df, fiserv_df):
+    """Keep Zoho only if in TSYS or Fiserv"""
+    def clean_id_numeric(s):
+        s = s.astype("string").str.strip()
+        s = s.str.replace(r"\.0+$", "", regex=True)
+        s = s.str.replace(r"\D+", "", regex=True)
+        s = s.replace("", pd.NA)
+        return s
+    
+    zoho_ids = clean_id_numeric(zoho_df["Merchant Number"])
+    tsys_ids = clean_id_numeric(tsys_df["Merchant ID"])
+    fiserv_ids = clean_id_numeric(fiserv_df["Merchant #"])
+    
+    valid_merchants = pd.Index(tsys_ids.dropna().unique()).union(
+        pd.Index(fiserv_ids.dropna().unique())
+    )
+    
+    mask_keep = zoho_ids.isin(valid_merchants)
+    
+    # Also remove specific agents
+    agents_to_remove = ['IS20', 'IS21', 'IS22', 'IS23', 'IS24']
+    zoho_final_kept = zoho_df.loc[mask_keep].copy()
+    zoho_final_kept = zoho_final_kept[~zoho_final_kept["Sales Id"].isin(agents_to_remove)].copy()
+    
+    zoho_final_remove = zoho_df.loc[~mask_keep].copy()
+    
+    return zoho_final_kept, zoho_final_remove
 
-    dba_norm = Valor["DBA NAME"].fillna("").astype(str).str.strip().str.lower()
+
+def create_monthly_min_zoho(zoho_kept_df, selected_month_year):
+    """Format Zoho for Monthly Min output"""
+    zoho_kept_df = zoho_kept_df.copy()
+    
+    # Add required columns
+    zoho_kept_df["Recurring Fee Code"] = 2
+    zoho_kept_df["Step 1"] = ""
+    
+    # Rename
+    zoho_kept_df = zoho_kept_df.rename(columns={
+        "Annual PCI Fee Month to Charge": "Recurring Fee Month",
+        "Monthly Minimum MPA": "Monthly Minimum"
+    })
+    
+    # PCI Count
+    zoho_kept_df["Recurring Fee Month"] = (
+        pd.to_numeric(zoho_kept_df["Recurring Fee Month"], errors="coerce").fillna(0).astype(int)
+    )
+    
+    selected_month = selected_month_year.month
+    zoho_kept_df["PCI Count"] = (zoho_kept_df["Recurring Fee Month"] == selected_month).astype(int)
+    
+    # Keep final columns
+    final_cols = [
+        "Processor", "Outside Agents", "Sales Id", "Merchant Number", "Account Name",
+        "Account Status", "Date Approved", "Date Closed", "Recurring Fee Code",
+        "Recurring Fee Month", "PCI Count", "PCI Amnt", "Monthly Minimum", "Step 1"
+    ]
+    
+    zoho_kept_df = zoho_kept_df.loc[:, final_cols].copy()
+    
+    # Format dates
+    zoho_kept_df["Date Approved"] = pd.to_datetime(zoho_kept_df["Date Approved"]).dt.strftime("%m/%d/%Y")
+    zoho_kept_df["Date Closed"] = pd.to_datetime(zoho_kept_df["Date Closed"]).dt.strftime("%m/%d/%Y")
+    
+    # Split by processor
+    proc = zoho_kept_df["Processor"].fillna("").astype(str).str.strip().str.lower()
+    Zoho_keep_Fiserv = zoho_kept_df.loc[proc.eq("fiserv")].copy()
+    Zoho_keep_TSYS = zoho_kept_df.loc[proc.eq("tsys")].copy()
+    
+    return Zoho_keep_Fiserv, Zoho_keep_TSYS
+
+
+def clean_mex(df, six_months_before):
+    """Clean MEX file"""
+    df = df.copy()
+    df["sales_rep_number"] = df["sales_rep_number"].astype(str).str.strip()
+    
+    # Remove closed
+    mask_remove = df["merchant_status"].fillna("").astype(str).str.strip().str.lower().eq("c")
+    kept_mex = df.loc[~mask_remove].copy()
+    
+    # Remove specific sales reps
+    sales_rep_numbers = ["HUBW-0000000006", "HUBW-0000000124", "HUBW-0000000024"]
+    mask_remove_rep = kept_mex["sales_rep_number"].isin(sales_rep_numbers)
+    kept_mex = kept_mex.loc[~mask_remove_rep].copy()
+    
+    return kept_mex
+
+
+def add_step1_to_zoho_tsys(zoho_tsys_df, mex_df):
+    """Add Step 1 values from MEX to Zoho TSYS"""
+    mex_cols = [
+        "visa_base_rate_discount_rev", "mc_base_rate_discount_rev",
+        "disc_base_rate_discount_rev", "amex_base_rate_discount_rev"
+    ]
+    
+    mex_df = mex_df.copy()
+    mex_df[mex_cols] = mex_df[mex_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
+    
+    mex_df["merchant_id_clean"] = mex_df["merchant_id"].astype(str).str.strip()
+    mex_df["mex_step1"] = mex_df[mex_cols].sum(axis=1)
+    
+    mex_step1_lookup = mex_df.groupby("merchant_id_clean")["mex_step1"].sum()
+    
+    zoho_tsys_df = zoho_tsys_df.copy()
+    zoho_tsys_df["Merchant_clean"] = zoho_tsys_df["Merchant Number"].astype(str).str.strip()
+    zoho_tsys_df["Step 1"] = zoho_tsys_df["Merchant_clean"].map(mex_step1_lookup).fillna(0)
+    zoho_tsys_df = zoho_tsys_df.drop(columns=["Merchant_clean"], errors="ignore")
+    
+    return zoho_tsys_df
+
+
+def process_valor_step1(valor_df, zoho_wireless_df, tsys_df, fiserv_df):
+    """Process Valor for Step 1"""
+    # Clean MIDs
+    for col in ["MID1", "MID2", "PROCESSOR"]:
+        valor_df[col] = valor_df[col].fillna("").astype(str).str.strip()
+    
+    valor_df["MID1"] = valor_df["MID1"].str.replace(r"\.0+$", "", regex=True)
+    valor_df["MID2"] = valor_df["MID2"].str.replace(r"\.0+$", "", regex=True)
+    
+    # Add 39 prefix for TSYS
+    valor_df["Processor"] = valor_df["PROCESSOR"].str.lower()
+    cond_tsys = valor_df["Processor"].str.startswith("tsys")
+    
+    mask_mid1 = cond_tsys & valor_df["MID1"].ne("")
+    valor_df.loc[mask_mid1, "MID1"] = "39" + valor_df.loc[mask_mid1, "MID1"]
+    
+    mask_mid2 = cond_tsys & valor_df["MID1"].eq("") & valor_df["MID2"].ne("")
+    valor_df.loc[mask_mid2, "MID2"] = "39" + valor_df.loc[mask_mid2, "MID2"]
+    
+    # Remove Webb/Mailbox Plus
+    dba_norm = valor_df["DBA NAME"].fillna("").astype(str).str.strip().str.lower()
     mask_webb = (dba_norm.str.startswith("webb")) | (dba_norm == "mailbox plus")
-    Valor = Valor.loc[~mask_webb].copy()
-
-    kept_f_ids = normalize_mid_series(kept_fiserv["Merchant #"])
-    kept_t_ids = normalize_mid_series(kept_tsys["Merchant ID"])
-
-    allowed = set(kept_f_ids) | set(kept_t_ids)
-    allowed |= {("39" + x) for x in kept_t_ids if x and not str(x).startswith("39")}
-    allowed.discard("")
-
-    Valor["MID1"] = Valor["MID1"].fillna("").astype(str).str.strip()
-    Valor["MID2"] = Valor["MID2"].fillna("").astype(str).str.strip()
-
-    keep = Valor["MID1"].isin(allowed) | Valor["MID2"].isin(allowed)
-    Valor = Valor.loc[keep].copy()
-
+    valor_df = valor_df.loc[~mask_webb].copy()
+    
+    # Keep only if in Fiserv or TSYS
+    fiserv_df["Merchant #"] = fiserv_df["Merchant #"].fillna("").astype(str).str.strip()
+    tsys_df["Merchant ID"] = tsys_df["Merchant ID"].fillna("").astype(str).str.strip()
+    valor_df["MID1"] = valor_df["MID1"].fillna("").astype(str).str.strip()
+    valor_df["MID2"] = valor_df["MID2"].fillna("").astype(str).str.strip()
+    
+    allowed_merchants = set(fiserv_df["Merchant #"]) | set(tsys_df["Merchant ID"])
+    allowed_merchants.discard("")
+    
+    mask_keep = valor_df["MID1"].isin(allowed_merchants) | valor_df["MID2"].isin(allowed_merchants)
+    valor_df = valor_df.loc[mask_keep].copy()
+    
+    # Add wireless count
     wireless_lookup = (
-        wireless_result[["Merchant Number", "Wireless Count"]]
+        zoho_wireless_df[["Merchant Number", "Wireless Count"]]
         .dropna(subset=["Merchant Number"])
         .drop_duplicates(subset=["Merchant Number"], keep="first")
         .set_index("Merchant Number")["Wireless Count"]
     )
-
-    if len(Valor.columns) > 11:
-        L_col_name = Valor.columns[11]
-        Valor["_L_clean"] = Valor[L_col_name].astype("string").str.extract(r"(\d+)")[0]
-        Valor["Wireless count"] = Valor["_L_clean"].map(wireless_lookup)
-
-        aj_pos = 35
-        col = Valor.pop("Wireless count")
-        Valor.insert(min(aj_pos, len(Valor.columns)), "Wireless count", col)
-        Valor.drop(columns=["_L_clean"], inplace=True, errors="ignore")
-
-    Valor.drop(columns=["Processor"], inplace=True, errors="ignore")
-
-    # ✅ FIX: match notebook extra blank column named exactly " " (single space) at END
-    Valor[" "] = ""
-
-    return Valor
+    
+    L_col_name = valor_df.columns[11]
+    valor_df["_L_clean"] = valor_df[L_col_name].astype("string").str.extract(r"(\d+)")[0]
+    valor_df["Wireless count"] = valor_df["_L_clean"].map(wireless_lookup)
+    
+    valor_df = valor_df.drop(columns=["_L_clean", "Processor"], errors="ignore")
+    
+    return valor_df
 
 
-# =============================
-# Step-1 pipeline
-# =============================
-def run_step1_pipeline(files: dict) -> dict[str, bytes]:
-    outputs: dict[str, bytes] = {}
-
-    tsys_raw = read_csv_bytes(files["Synoptic_TSYS"])
-    fiserv_raw = read_csv_bytes(files["Synoptic_Fiserv"], skiprows=1, dtype=str)
-
-    paso_s1 = read_csv_bytes(files["PASO_S1"], skiprows=1, dtype={"MerchantNumber": "string"})
-    paso_s2 = read_csv_bytes(files["PASO_S2"], skiprows=1, dtype={"MerchantNumber": "string"})
-    paso_all = pd.concat([clean_nbsp(paso_s1), clean_nbsp(paso_s2)], ignore_index=True)
-
-    kept_tsys = clean_tsys_synoptic(tsys_raw, selected_month_year, six_months_before)
-    kept_fiserv = clean_fiserv_synoptic(fiserv_raw, selected_month_year, six_months_before, paso_all)
-
-    # PASO output
-    kept_fiserv_mid = kept_fiserv["Merchant #"].astype("string").str.replace("\xa0", "", regex=False).str.strip()
-    paso_all["MerchantNumber"] = paso_all["MerchantNumber"].astype("string").str.strip()
-    paso_kept = paso_all.loc[paso_all["MerchantNumber"].isin(kept_fiserv_mid)].copy()
-    outputs["PASO_Output.csv"] = to_csv_bytes(paso_kept)
-
-    # Zoho
-    zoho_raw = read_excel_bytes(
-        files["Zoho_All_Fees"],
-        skiprows=6,
-        dtype={"Merchant Number": "string", "Sales Id": "string"},
-    )
-    zoho_keep_fiserv, zoho_keep_tsys, final_cols = process_zoho(zoho_raw, kept_tsys, kept_fiserv, selected_month_year)
-
-    # MEX monthly + Step1 lookup for TSYS zoho
-    mex_raw = read_excel_bytes(files["MEX_file"])
-    kept_mex_monthly = mex_for_monthly(mex_raw)
-    zoho_keep_tsys = apply_mex_step1_lookup(zoho_keep_tsys, kept_mex_monthly, final_cols)
-
-    # Monthly min workbook
-    monthly_buf = io.BytesIO()
-    with pd.ExcelWriter(monthly_buf, engine="openpyxl") as writer:
-        zoho_keep_fiserv.to_excel(writer, sheet_name="Fiserv", index=False)
-        pd.DataFrame().to_excel(writer, sheet_name="Step1", index=False)
-        zoho_keep_tsys.to_excel(writer, sheet_name="TSYS", index=False)
-
-        kept_mex_sheet = kept_mex_monthly.drop(columns=["merchant_id_clean", "mex_step1"], errors="ignore")
-        kept_mex_sheet.to_excel(writer, sheet_name="MEX", index=False)
-    monthly_buf.seek(0)
-    outputs["Monthly min and annual PCI without Step1 Output.xlsx"] = monthly_buf.getvalue()
-
-    # MEX output CSV
-    mex_out_df = mex_output_csv(mex_raw, six_months_before)
-    outputs["MEX_Output.csv"] = to_csv_bytes(mex_out_df)
-
-    # Wireless
-    wireless_raw = read_excel_bytes(files["Zoho_Wireless"], skiprows=6)
-    wireless_result = build_wireless_count_sheet(wireless_raw)
-
-    # Valor
-    valor_raw = read_excel_bytes(
-        files["Valor"],
-        converters={
-            "MID1": lambda x: "" if pd.isna(x) else str(x),
-            "MID2": lambda x: "" if pd.isna(x) else str(x),
-            "PROCESSOR": lambda x: "" if pd.isna(x) else str(x),
-            "DBA NAME": lambda x: "" if pd.isna(x) else str(x),
-        },
-    )
-    valor_iso = process_valor(valor_raw, wireless_result, kept_fiserv, kept_tsys)
-
-    valor_buf = io.BytesIO()
-    with pd.ExcelWriter(valor_buf, engine="openpyxl") as writer:
-        valor_iso.to_excel(writer, sheet_name="ISO Report", index=False)
-        wireless_result.to_excel(writer, sheet_name="Wireless Count", index=False)
-    valor_buf.seek(0)
-    outputs["Valor_1ST_level_Output.xlsx"] = valor_buf.getvalue()
-
-    return outputs
-
-
-def make_zip_bytes(outputs: dict[str, bytes]) -> bytes:
-    zbuf = io.BytesIO()
-    with zipfile.ZipFile(zbuf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for fname, data in outputs.items():
-            zf.writestr(fname, data)
-    zbuf.seek(0)
-    return zbuf.getvalue()
+def process_wireless_count(zoho_wireless_df):
+    """Process wireless count from Zoho wireless report"""
+    # Column A contains merchant number and count in format: 123456(X)
+    colA = zoho_wireless_df.columns[0]
+    
+    A = zoho_wireless_df[colA].astype("string")
+    mid_A = A.str.extract(r"(\d+)")[0]
+    cnt_A = A.str.extract(r"\(\s*([^)]+)\s*\)")[0]
+    
+    lookup = pd.Series(cnt_A.values, index=mid_A).dropna()
+    lookup = lookup[~lookup.index.duplicated(keep="first")]
+    
+    # Map to merchant numbers
+    colF = "Merchant Number"
+    mid_F = zoho_wireless_df[colF].astype("string").str.extract(r"(\d+)")[0]
+    wireless_count = mid_F.map(lookup)
+    
+    result = pd.DataFrame({
+        "Merchant Number": mid_F,
+        "Account Name": zoho_wireless_df["Account Name"].astype("string"),
+        "Wireless Count": wireless_count.astype("string")
+    }).dropna(subset=["Merchant Number"]).drop_duplicates(subset=["Merchant Number"], keep="first").reset_index(drop=True)
+    
+    return result
 
 
 # =============================
-# UI Uploaders (8 inputs)
+# Session State
 # =============================
-st.header("📁 Step 1: Upload 8 Raw Input Files")
-
-col1, col2 = st.columns(2)
-
-with col1:
-    st.subheader("Synoptic")
-    f_tsys = st.file_uploader("Synoptic — TSYS (CSV)", type=["csv"])
-    f_fiserv = st.file_uploader("Synoptic — Fiserv (CSV)", type=["csv"])
-
-    st.subheader("Zoho")
-    f_zoho = st.file_uploader("Zoho — All Fees (XLSX)", type=["xlsx"])
-    f_wireless = st.file_uploader("Zoho — Wireless (XLSX)", type=["xlsx"])
-
-with col2:
-    st.subheader("Other")
-    f_mex = st.file_uploader("MEX file (XLSX)", type=["xlsx"])
-    f_s1 = st.file_uploader("PASO S1 (CSV)", type=["csv"])
-    f_s2 = st.file_uploader("PASO S2 (CSV)", type=["csv"])
-    f_valor = st.file_uploader("Valor Step1 (XLSX)", type=["xlsx"])
-
-files = {
-    "Synoptic_TSYS": f_tsys,
-    "Synoptic_Fiserv": f_fiserv,
-    "Zoho_All_Fees": f_zoho,
-    "Zoho_Wireless": f_wireless,
-    "MEX_file": f_mex,
-    "PASO_S1": f_s1,
-    "PASO_S2": f_s2,
-    "Valor": f_valor,
-}
-
-missing = [k for k, v in files.items() if v is None]
-st.markdown("---")
-
-c1, c2 = st.columns([1, 1])
-with c1:
-    if st.button("🧹 Clear outputs / Start over", use_container_width=True):
-        st.session_state.step1_outputs = {}
-        st.session_state.step1_ran = False
-        st.session_state.last_run_meta = {}
-        st.rerun()
-
-with c2:
-    if st.session_state.step1_ran and st.session_state.last_run_meta:
-        st.info(f"Last run: {st.session_state.last_run_meta.get('label', 'Unknown')}")
-
-if missing:
-    st.warning("⚠️ Missing: " + ", ".join(missing))
-else:
-    st.success("✅ All 8 files uploaded.")
-
-    if st.button("🚀 Generate Step-1 Outputs", type="primary", use_container_width=True):
-        with st.spinner("Running Step-1 pipeline..."):
-            try:
-                outputs = run_step1_pipeline(files)
-                st.session_state.step1_outputs = outputs
-                st.session_state.step1_ran = True
-                st.session_state.last_run_meta = {
-                    "label": f"{selected_month_year.strftime('%B %Y')} ({datetime.now().strftime('%H:%M:%S')})"
-                }
-                st.success("✅ Outputs generated and saved. You can download without losing state.")
-            except Exception as e:
-                st.error(f"❌ Step-1 pipeline failed: {e}")
+if 'step' not in st.session_state:
+    st.session_state.step = 1
 
 # =============================
-# Download section (persists across reruns)
+# Sidebar - Date Selection
 # =============================
-if st.session_state.step1_ran and st.session_state.step1_outputs:
+with st.sidebar:
+    st.header("📅 Date Selection")
+    
+    month_list = ["January", "February", "March", "April", "May", "June", 
+                  "July", "August", "September", "October", "November", "December"]
+    
+    current_month_index = pd.Timestamp.today().month - 1
+    current_year = pd.Timestamp.today().year
+    
+    selected_month = st.selectbox("Month", month_list, index=current_month_index)
+    selected_year = st.number_input("Year", min_value=2020, max_value=2030, value=current_year)
+    
+    month_number = month_list.index(selected_month) + 1
+    last_day = calendar.monthrange(selected_year, month_number)[1]
+    selected_month_year = pd.Timestamp(f"{selected_year}-{month_number:02d}-{last_day}")
+    six_months_before = selected_month_year - pd.DateOffset(months=6) + MonthEnd(0)
+    
+    st.info(f"**Selected:** {selected_month} {selected_year}\n\n**Date:** {selected_month_year.date()}")
     st.markdown("---")
-    st.subheader("📥 Download Outputs")
+    st.info(f"**Current Step:** {st.session_state.step}")
 
-    outputs = st.session_state.step1_outputs
-
-    zip_bytes = make_zip_bytes(outputs)
-    st.download_button(
-        label="⬇️ Download ALL outputs (ZIP)",
-        data=zip_bytes,
-        file_name="Step1_Outputs.zip",
-        mime="application/zip",
-        use_container_width=True,
-    )
-
-    st.markdown("### Or download individually")
-
-    order = [
-        "PASO_Output.csv",
-        "MEX_Output.csv",
-        "Valor_1ST_level_Output.xlsx",
-        "Monthly min and annual PCI without Step1 Output.xlsx",
-    ]
-    for name in order:
-        if name not in outputs:
-            continue
-        mime = "text/csv" if name.endswith(".csv") else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        st.download_button(
-            label=f"⬇️ {name}",
-            data=outputs[name],
-            file_name=name,
-            mime=mime,
-            use_container_width=True,
-        )
-
-st.markdown("---")
-st.caption("Residuals Data Cleaning Pipeline — Step 1 (Final.ipynb aligned) • Persistent downloads + ZIP")
-
+# =============================
+# Step 1
+# =============================
+if st.session_state.step == 1:
+    st.header("📁 Step 1: Upload Input Files")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        fiserv_file = st.file_uploader("Synoptic — Fiserv", type=["csv", "xlsx"], key="fiserv")
+        tsys_file = st.file_uploader("Synoptic — TSYS", type=["csv", "xlsx"], key="tsys")
+        zoho_fees_file = st.file_uploader("Zoho — All Fees", type=["csv", "xlsx"], key="zoho_fees")
+        zoho_wireless_file = st.file_uploader("Zoho — Wireless", type=["csv", "xlsx"], key="zoho_wireless")
+    
+    with col2:
+        mex_file = st.file_uploader("MEX file", type=["csv", "xlsx"], key="mex")
+        paso_s1_file = st.file_uploader("PASO S1", type=["csv", "xlsx"], key="paso_s1")
+        paso_s2_file = st.file_uploader("PASO S2", type=["csv", "xlsx"], key="paso_s2")
+        valor_file = st.file_uploader("Valor", type=["csv", "xlsx"], key="valor")
+    
+    all_files_uploaded = all([
+        fiserv_file, tsys_file, zoho_fees_file, zoho_wireless_file,
+        mex_file, paso_s1_file, paso_s2_file, valor_file
+    ])
+    
+    if all_files_uploaded:
+        st.success("✅ All 8 files uploaded successfully!")
+        
+        if st.button("🚀 Process Step 1", type="primary", use_container_width=True):
+            with st.spinner("Processing files..."):
+                try:
+                    # Read files
+                    fiserv_df = pd.read_csv(io.BytesIO(fiserv_file.getvalue()), skiprows=1, dtype={"Merchant #": "string"})
+                    tsys_df = pd.read_csv(io.BytesIO(tsys_file.getvalue()))
+                    zoho_fees_df = pd.read_excel(io.BytesIO(zoho_fees_file.getvalue()), skiprows=6, dtype={"Merchant Number": "string", "Sales Id": "string"})
+                    zoho_wireless_df = pd.read_excel(io.BytesIO(zoho_wireless_file.getvalue()), skiprows=6)
+                    mex_df = pd.read_excel(io.BytesIO(mex_file.getvalue()))
+                    paso_s1_df = pd.read_csv(io.BytesIO(paso_s1_file.getvalue()), skiprows=1, dtype={"MerchantNumber": "string"})
+                    paso_s2_df = pd.read_csv(io.BytesIO(paso_s2_file.getvalue()), skiprows=1, dtype={"MerchantNumber": "string"})
+                    valor_df = pd.read_excel(io.BytesIO(valor_file.getvalue()), converters={"MID1": lambda x: "" if pd.isna(x) else str(x), "MID2": lambda x: "" if pd.isna(x) else str(x)})
+                    
+                    # Process PASO first (needed for Fiserv)
+                    paso_s1_clean = clean_nbsp(paso_s1_df)
+                    paso_s2_clean = clean_nbsp(paso_s2_df)
+                    paso_combined = pd.concat([paso_s1_clean, paso_s2_clean], ignore_index=True)
+                    
+                    # Clean TSYS
+                    kept_tsys, removed_tsys = clean_tsys_synoptic(tsys_df, selected_month_year, six_months_before)
+                    
+                    # Clean Fiserv (needs PASO)
+                    kept_fiserv, removed_fiserv = clean_fiserv_synoptic(fiserv_df, paso_combined, selected_month_year, six_months_before)
+                    
+                    # PASO Output
+                    paso_output = process_paso(paso_s1_df, paso_s2_df, kept_fiserv)
+                    
+                    # Clean Zoho
+                    zoho_kept, zoho_removed = clean_zoho(zoho_fees_df, selected_month_year, six_months_before)
+                    zoho_final_kept, zoho_final_removed = filter_zoho_by_processors(zoho_kept, kept_tsys, kept_fiserv)
+                    
+                    # Format Zoho for Monthly Min
+                    zoho_fiserv, zoho_tsys = create_monthly_min_zoho
