@@ -1,4 +1,6 @@
 import io
+import os
+import zipfile
 import calendar
 from datetime import datetime
 
@@ -23,7 +25,20 @@ st.caption(
 st.markdown("---")
 
 # =============================
-# Sidebar: Month/Year (Final.ipynb equivalent)
+# Session state (prevents reset on rerun/download)
+# =============================
+if "step1_outputs" not in st.session_state:
+    # dict[str, bytes]
+    st.session_state.step1_outputs = {}
+
+if "step1_ran" not in st.session_state:
+    st.session_state.step1_ran = False
+
+if "last_run_meta" not in st.session_state:
+    st.session_state.last_run_meta = {}
+
+# =============================
+# Sidebar: Month/Year
 # =============================
 with st.sidebar:
     st.header("⚙️ Settings")
@@ -46,23 +61,17 @@ with st.sidebar:
     st.info(f"Selected month-end: **{selected_month_year.date()}**")
     st.info(f"Six months before (month-end): **{six_months_before.date()}**")
 
-
 # =============================
 # Helpers
 # =============================
-def to_csv_bytes(df: pd.DataFrame) -> io.BytesIO:
-    b = io.BytesIO(df.to_csv(index=False).encode("utf-8"))
-    b.seek(0)
-    return b
-
+def to_csv_bytes(df: pd.DataFrame) -> bytes:
+    return df.to_csv(index=False).encode("utf-8")
 
 def read_csv_bytes(uploaded_file, **kwargs) -> pd.DataFrame:
     return pd.read_csv(io.BytesIO(uploaded_file.getvalue()), **kwargs)
 
-
 def read_excel_bytes(uploaded_file, **kwargs) -> pd.DataFrame:
     return pd.read_excel(io.BytesIO(uploaded_file.getvalue()), **kwargs)
-
 
 def clean_nbsp(df: pd.DataFrame) -> pd.DataFrame:
     for col in df.columns:
@@ -77,14 +86,12 @@ def clean_nbsp(df: pd.DataFrame) -> pd.DataFrame:
             )
     return df
 
-
 def clean_id_numeric(s: pd.Series) -> pd.Series:
     s = s.astype("string").str.strip()
     s = s.str.replace(r"\.0+$", "", regex=True)
     s = s.str.replace(r"\D+", "", regex=True)
     s = s.replace("", pd.NA)
     return s
-
 
 # =============================
 # TSYS synoptic cleaning (Final.ipynb logic)
@@ -120,7 +127,6 @@ def clean_tsys_synoptic(tsys_df: pd.DataFrame, selected_month_year: pd.Timestamp
         df = df.drop_duplicates(subset=["Merchant ID"], keep="first")
 
     return df
-
 
 # =============================
 # Fiserv synoptic cleaning (Final.ipynb logic)
@@ -173,7 +179,7 @@ def clean_fiserv_synoptic(
             .str.replace(r"\D+", "", regex=True)
         )
 
-    # ✅ FIX #1 (PASO mismatch): remove CLOSE merchants with old/blank Last Batch Activity (Final.ipynb behavior)
+    # Remove CLOSE merchants with old/blank Last Batch Activity (Final.ipynb behavior)
     if "Merchant Status" in df.columns and "Last Batch Activity" in df.columns:
         status_close = df["Merchant Status"].fillna("").astype(str).str.strip().str.lower().eq("close")
         lba = pd.to_datetime(df["Last Batch Activity"], errors="coerce")
@@ -186,7 +192,6 @@ def clean_fiserv_synoptic(
         df = df.loc[(~status_close) | (df["Merchant #"].isin(paso_merchants))].copy()
 
     return df
-
 
 # =============================
 # Zoho processing (Final.ipynb logic)
@@ -271,9 +276,8 @@ def process_zoho(
 
     return z_fiserv, z_tsys, final_cols
 
-
 # =============================
-# MEX monthly + VLOOKUP Step 1 + MEX output (Final.ipynb)
+# MEX logic
 # =============================
 def mex_for_monthly(mex_raw: pd.DataFrame) -> pd.DataFrame:
     m = mex_raw.copy()
@@ -285,7 +289,6 @@ def mex_for_monthly(mex_raw: pd.DataFrame) -> pd.DataFrame:
     reps = {"HUBW-0000000006", "HUBW-0000000124", "HUBW-0000000024"}
     m = m.loc[~m["sales_rep_number"].isin(reps)].copy()
     return m
-
 
 def apply_mex_step1_lookup(zoho_keep_tsys: pd.DataFrame, kept_mex: pd.DataFrame, final_cols: list[str]) -> pd.DataFrame:
     mex_cols = [
@@ -309,7 +312,6 @@ def apply_mex_step1_lookup(zoho_keep_tsys: pd.DataFrame, kept_mex: pd.DataFrame,
     z = z.drop(columns=["Merchant_clean"], errors="ignore")
     z = z.loc[:, final_cols].copy()
     return z
-
 
 def mex_output_csv(mex_raw: pd.DataFrame, six_months_before: pd.Timestamp) -> pd.DataFrame:
     MEX = mex_raw.copy()
@@ -342,9 +344,8 @@ def mex_output_csv(mex_raw: pd.DataFrame, six_months_before: pd.Timestamp) -> pd
 
     return kept_mex_1
 
-
 # =============================
-# Wireless count sheet (Final.ipynb)
+# Wireless count sheet
 # =============================
 def build_wireless_count_sheet(wcv_raw: pd.DataFrame) -> pd.DataFrame:
     WCV = wcv_raw.copy()
@@ -374,9 +375,8 @@ def build_wireless_count_sheet(wcv_raw: pd.DataFrame) -> pd.DataFrame:
 
     return result
 
-
 # =============================
-# Valor ISO report (Final.ipynb)
+# Valor ISO report
 # =============================
 def process_valor(valor_raw: pd.DataFrame, wireless_result: pd.DataFrame, kept_fiserv: pd.DataFrame, kept_tsys: pd.DataFrame) -> pd.DataFrame:
     Valor = valor_raw.copy()
@@ -404,7 +404,6 @@ def process_valor(valor_raw: pd.DataFrame, wireless_result: pd.DataFrame, kept_f
     kept_f_ids = kept_fiserv["Merchant #"].fillna("").astype(str).str.strip()
     kept_t_ids = kept_tsys["Merchant ID"].fillna("").astype(str).str.strip()
 
-    # ✅ FIX #2 (Valor missing rows): broaden allowed set to include TSYS IDs with and without the 39 prefix
     allowed = set(kept_f_ids) | set(kept_t_ids)
     allowed |= {("39" + x) for x in kept_t_ids if x and not str(x).startswith("39")}
     allowed.discard("")
@@ -434,20 +433,18 @@ def process_valor(valor_raw: pd.DataFrame, wireless_result: pd.DataFrame, kept_f
 
     Valor.drop(columns=["Processor"], inplace=True, errors="ignore")
 
-    # ✅ FIX #3 (Valor blank column): match notebook extra blank column named " "
+    # Match notebook extra blank column named " "
     if " " not in Valor.columns:
         Valor[" "] = ""
 
     return Valor
 
-
 # =============================
-# Main Step-1 pipeline: produce 4 outputs
+# Step-1 pipeline
 # =============================
-def run_step1_pipeline(files: dict) -> dict:
-    out = {}
+def run_step1_pipeline(files: dict) -> dict[str, bytes]:
+    outputs: dict[str, bytes] = {}
 
-    # Load inputs exactly like Final.ipynb
     tsys_raw = read_csv_bytes(files["Synoptic_TSYS"])
     fiserv_raw = read_csv_bytes(files["Synoptic_Fiserv"], skiprows=1, dtype=str)
 
@@ -458,22 +455,22 @@ def run_step1_pipeline(files: dict) -> dict:
     kept_tsys = clean_tsys_synoptic(tsys_raw, selected_month_year, six_months_before)
     kept_fiserv = clean_fiserv_synoptic(fiserv_raw, selected_month_year, six_months_before, paso_all)
 
-    # 1) PASO_Output.csv
     kept_fiserv_mid = kept_fiserv["Merchant #"].astype("string").str.replace("\xa0", "", regex=False).str.strip()
     paso_all["MerchantNumber"] = paso_all["MerchantNumber"].astype("string").str.strip()
     paso_kept = paso_all.loc[paso_all["MerchantNumber"].isin(kept_fiserv_mid)].copy()
-    out["PASO_Output.csv"] = to_csv_bytes(paso_kept)
+    outputs["PASO_Output.csv"] = to_csv_bytes(paso_kept)
 
-    # Zoho
-    zoho_raw = read_excel_bytes(files["Zoho_All_Fees"], skiprows=6, dtype={"Merchant Number": "string", "Sales Id": "string"})
+    zoho_raw = read_excel_bytes(
+        files["Zoho_All_Fees"],
+        skiprows=6,
+        dtype={"Merchant Number": "string", "Sales Id": "string"},
+    )
     zoho_keep_fiserv, zoho_keep_tsys, final_cols = process_zoho(zoho_raw, kept_tsys, kept_fiserv, selected_month_year)
 
-    # MEX
     mex_raw = read_excel_bytes(files["MEX_file"])
     kept_mex_monthly = mex_for_monthly(mex_raw)
     zoho_keep_tsys = apply_mex_step1_lookup(zoho_keep_tsys, kept_mex_monthly, final_cols)
 
-    # 2) Monthly min and annual PCI without Step1 Output.xlsx
     monthly_buf = io.BytesIO()
     with pd.ExcelWriter(monthly_buf, engine="openpyxl") as writer:
         zoho_keep_fiserv.to_excel(writer, sheet_name="Fiserv", index=False)
@@ -482,19 +479,15 @@ def run_step1_pipeline(files: dict) -> dict:
 
         kept_mex_sheet = kept_mex_monthly.drop(columns=["merchant_id_clean", "mex_step1"], errors="ignore")
         kept_mex_sheet.to_excel(writer, sheet_name="MEX", index=False)
-
     monthly_buf.seek(0)
-    out["Monthly min and annual PCI without Step1 Output.xlsx"] = monthly_buf
+    outputs["Monthly min and annual PCI without Step1 Output.xlsx"] = monthly_buf.getvalue()
 
-    # 3) MEX_Output.csv
     mex_out_df = mex_output_csv(mex_raw, six_months_before)
-    out["MEX_Output.csv"] = to_csv_bytes(mex_out_df)
+    outputs["MEX_Output.csv"] = to_csv_bytes(mex_out_df)
 
-    # Wireless
     wireless_raw = read_excel_bytes(files["Zoho_Wireless"], skiprows=6)
     wireless_result = build_wireless_count_sheet(wireless_raw)
 
-    # Valor
     valor_raw = read_excel_bytes(
         files["Valor"],
         converters={
@@ -504,20 +497,24 @@ def run_step1_pipeline(files: dict) -> dict:
             "DBA NAME": lambda x: "" if pd.isna(x) else str(x),
         },
     )
-
     valor_iso = process_valor(valor_raw, wireless_result, kept_fiserv, kept_tsys)
 
-    # 4) Valor_1ST_level_Output.xlsx
     valor_buf = io.BytesIO()
     with pd.ExcelWriter(valor_buf, engine="openpyxl") as writer:
         valor_iso.drop(columns=["MID1_clean"], errors="ignore").to_excel(writer, sheet_name="ISO Report", index=False)
         wireless_result.to_excel(writer, sheet_name="Wireless Count", index=False)
-
     valor_buf.seek(0)
-    out["Valor_1ST_level_Output.xlsx"] = valor_buf
+    outputs["Valor_1ST_level_Output.xlsx"] = valor_buf.getvalue()
 
-    return out
+    return outputs
 
+def make_zip_bytes(outputs: dict[str, bytes]) -> bytes:
+    zbuf = io.BytesIO()
+    with zipfile.ZipFile(zbuf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for fname, data in outputs.items():
+            zf.writestr(fname, data)
+    zbuf.seek(0)
+    return zbuf.getvalue()
 
 # =============================
 # UI Uploaders (8 inputs)
@@ -528,19 +525,19 @@ col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("Synoptic")
-    f_tsys = st.file_uploader("Synoptic — TSYS (Synoptic_Tsys.csv)", type=["csv"])
-    f_fiserv = st.file_uploader("Synoptic — Fiserv (Synoptic_Fiserv.csv)", type=["csv"])
+    f_tsys = st.file_uploader("Synoptic — TSYS (CSV)", type=["csv"])
+    f_fiserv = st.file_uploader("Synoptic — Fiserv (CSV)", type=["csv"])
 
     st.subheader("Zoho")
-    f_zoho = st.file_uploader("Zoho — All Fees (Zoho_Reports.xlsx)", type=["xlsx"])
-    f_wireless = st.file_uploader("Zoho — Wireless (Wireless Report - New (IRIS).xlsx)", type=["xlsx"])
+    f_zoho = st.file_uploader("Zoho — All Fees (XLSX)", type=["xlsx"])
+    f_wireless = st.file_uploader("Zoho — Wireless (XLSX)", type=["xlsx"])
 
 with col2:
     st.subheader("Other")
-    f_mex = st.file_uploader("MEX file (MEX_09.xlsx)", type=["xlsx"])
-    f_s1 = st.file_uploader("PASO S1 (S1_09_1800.csv)", type=["csv"])
-    f_s2 = st.file_uploader("PASO S2 (S2_09_3900.csv)", type=["csv"])
-    f_valor = st.file_uploader("Valor Step1 (Valor_Step1.xlsx)", type=["xlsx"])
+    f_mex = st.file_uploader("MEX file (XLSX)", type=["xlsx"])
+    f_s1 = st.file_uploader("PASO S1 (CSV)", type=["csv"])
+    f_s2 = st.file_uploader("PASO S2 (CSV)", type=["csv"])
+    f_valor = st.file_uploader("Valor Step1 (XLSX)", type=["xlsx"])
 
 files = {
     "Synoptic_TSYS": f_tsys,
@@ -556,40 +553,76 @@ files = {
 missing = [k for k, v in files.items() if v is None]
 st.markdown("---")
 
+# Optional: clear outputs
+c1, c2 = st.columns([1, 1])
+with c1:
+    if st.button("🧹 Clear outputs / Start over", use_container_width=True):
+        st.session_state.step1_outputs = {}
+        st.session_state.step1_ran = False
+        st.session_state.last_run_meta = {}
+        st.rerun()
+
+with c2:
+    if st.session_state.step1_ran and st.session_state.last_run_meta:
+        st.info(f"Last run: {st.session_state.last_run_meta.get('label', 'Unknown')}")
+
 if missing:
     st.warning("⚠️ Missing: " + ", ".join(missing))
 else:
     st.success("✅ All 8 files uploaded.")
 
-    if st.button("🚀 Generate Step-1 Outputs (Final.ipynb)", type="primary", use_container_width=True):
+    if st.button("🚀 Generate Step-1 Outputs", type="primary", use_container_width=True):
         with st.spinner("Running Step-1 pipeline..."):
             try:
                 outputs = run_step1_pipeline(files)
-                st.success("✅ Step-1 Outputs Ready!")
-
-                st.subheader("📥 Download Outputs")
-
-                order = [
-                    "PASO_Output.csv",
-                    "MEX_Output.csv",
-                    "Valor_1ST_level_Output.xlsx",
-                    "Monthly min and annual PCI without Step1 Output.xlsx",
-                ]
-
-                for name in order:
-                    buf = outputs[name]
-                    mime = "text/csv" if name.endswith(".csv") else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    st.download_button(
-                        label=f"⬇️ Download {name}",
-                        data=buf.getvalue(),
-                        file_name=name,
-                        mime=mime,
-                        use_container_width=True,
-                    )
-
+                st.session_state.step1_outputs = outputs
+                st.session_state.step1_ran = True
+                st.session_state.last_run_meta = {
+                    "label": f"{selected_month_year.strftime('%B %Y')} ({datetime.now().strftime('%H:%M:%S')})"
+                }
+                st.success("✅ Outputs generated and saved. You can download without losing state.")
             except Exception as e:
                 st.error(f"❌ Step-1 pipeline failed: {e}")
 
+# =============================
+# Download section (persists across reruns)
+# =============================
+if st.session_state.step1_ran and st.session_state.step1_outputs:
+    st.markdown("---")
+    st.subheader("📥 Download Outputs")
+
+    outputs = st.session_state.step1_outputs
+
+    # Download ALL at once
+    zip_bytes = make_zip_bytes(outputs)
+    st.download_button(
+        label="⬇️ Download ALL outputs (ZIP)",
+        data=zip_bytes,
+        file_name="Step1_Outputs.zip",
+        mime="application/zip",
+        use_container_width=True,
+    )
+
+    st.markdown("### Or download individually")
+
+    order = [
+        "PASO_Output.csv",
+        "MEX_Output.csv",
+        "Valor_1ST_level_Output.xlsx",
+        "Monthly min and annual PCI without Step1 Output.xlsx",
+    ]
+    for name in order:
+        if name not in outputs:
+            continue
+        mime = "text/csv" if name.endswith(".csv") else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        st.download_button(
+            label=f"⬇️ {name}",
+            data=outputs[name],
+            file_name=name,
+            mime=mime,
+            use_container_width=True,
+        )
+
 st.markdown("---")
-st.caption("Residuals Data Cleaning Pipeline — Step 1 (Final.ipynb aligned)")
+st.caption("Residuals Data Cleaning Pipeline — Step 1 (Final.ipynb aligned) • Downloads persist + ZIP enabled")
 
